@@ -1,0 +1,20 @@
+[package]
+name = "ball-gfx-hal"
+version = "0.1.0"
+authors = ["Benjamin <benjamin@chronicembetterment.org>"]
+edition = "2018"
+
+[features]
+default = ["renderdoc"]
+
+[dependencies]
+gfx-hal = { git = "https://github.com/gfx-rs/gfx", rev = "bd7f058efe78d7626a1cc6fbc0c1d3702fb6d2e7" }
+gfx-memory = { git = "https://github.com/gfx-rs/gfx-memory", rev = "1dacf31e26990c9636ba0f566ca8b02bcdd7e503" }
+gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx", rev = "bd7f058efe78d7626a1cc6fbc0c1d3702fb6d2e7" }
+imgui-gfx-hal = { git = "https://git.chronicembetterment.org/git/benjamin/imgui-gfx-hal" }
+imgui = "0.0.21"
+env_logger = "0.6.0"
+winit = "0.17.0"
+imgui-winit = "0.1.1"
+log = "0.4.6"
+renderdoc = { version = "0.4.0", optional = true }
