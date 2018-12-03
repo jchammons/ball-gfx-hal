@@ -1,10 +1,13 @@
-#![feature(await_macro, async_await, futures_api, duration_float)]
+#![feature(duration_float)]
 
 extern crate gfx_backend_vulkan as backend;
+use ctrlc;
 use env_logger;
 use imgui::{im_str, ImGui, ImString};
 use imgui_winit::ImGuiWinit;
+use std::net::SocketAddr;
 use std::time::Instant;
+use structopt::StructOpt;
 use winit::{Event, EventsLoop, Window, WindowEvent};
 
 pub mod double_buffer;
@@ -15,10 +18,35 @@ pub mod state;
 
 const FRAME_TIME_HISTORY_LENGTH: usize = 200;
 
+#[derive(StructOpt, Debug)]
+#[structopt(name = "ball-gfx-hal")]
+struct Cli {
+    /// Instead of opening a gui window, host a headless server on
+    /// this address.
+    #[structopt(short = "s", long = "host-server")]
+    host_server: Option<SocketAddr>,
+}
+
 fn main() {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
 
+    let cli = Cli::from_args();
+
+    match cli.host_server {
+        Some(addr) => {
+            let (server, thread) = networking::server::host(addr).unwrap();
+            ctrlc::set_handler(move || {
+                server.shutdown();
+            })
+            .unwrap();
+            thread.join().unwrap();
+        }
+        None => run_gui(),
+    }
+}
+
+fn run_gui() {
     let mut vsync = false;
 
     let mut frame_time_history = Vec::with_capacity(FRAME_TIME_HISTORY_LENGTH);

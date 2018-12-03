@@ -5,7 +5,6 @@ use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use crossbeam::channel::{self as cb_channel, Receiver as CbReceiver, Sender as CbSender};
 use log::{debug, error, info, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
@@ -17,7 +16,9 @@ use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{
+    self as std_channel, Receiver as StdReceiver, Sender as StdSender, TryRecvError,
+};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ pub struct ClientHandshake;
 
 pub enum ClientState {
     Connecting {
-        done: CbSender<Result<Arc<GameClient>, Error>>,
+        done: StdSender<Result<Arc<GameClient>, Error>>,
         timeout: Timeout,
     },
     Connected {
@@ -69,11 +70,11 @@ pub struct ClientHandle {
 }
 
 pub struct ConnectingHandle {
-    done: CbReceiver<Result<Arc<GameClient>, Error>>,
+    done: StdReceiver<Result<Arc<GameClient>, Error>>,
 }
 
 pub fn connect(addr: SocketAddr) -> Result<(ClientHandle, ConnectingHandle), Error> {
-    let (done_tx, done_rx) = cb_channel::bounded(1);
+    let (done_tx, done_rx) = std_channel::channel();
     let (shutdown_tx, shutdown_rx) = mio_channel::channel();
     let mut client = Client::new(addr, done_tx, shutdown_rx)?;
     thread::spawn(move || {
@@ -89,7 +90,7 @@ pub fn connect(addr: SocketAddr) -> Result<(ClientHandle, ConnectingHandle), Err
 
 impl ClientHandle {
     /// Signals the client thread to shutdown.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
         let _ = self.shutdown.send(());
     }
 }
@@ -99,10 +100,10 @@ impl ConnectingHandle {
     pub fn done(&mut self) -> Option<Result<Arc<GameClient>, Error>> {
         match self.done.try_recv() {
             Ok(done) => Some(done),
-            Err(cb_channel::TryRecvError::Empty) => None,
+            Err(TryRecvError::Empty) => None,
             // Disconnected also means it never finished connecting,
             // but maybe we should handle this a different way.
-            Err(cb_channel::TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Disconnected) => None,
         }
     }
 }
@@ -169,7 +170,7 @@ impl EventHandler for Client {
 impl Client {
     pub fn new(
         addr: SocketAddr,
-        done: CbSender<Result<Arc<GameClient>, Error>>,
+        done: StdSender<Result<Arc<GameClient>, Error>>,
         shutdown: MioReceiver<()>,
     ) -> Result<Client, Error> {
         let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap()).map_err(Error::bind_socket)?;
@@ -311,7 +312,7 @@ impl Client {
                     snapshots: Mutex::new(DoubleBuffer::new((handshake.snapshot, Instant::now()))),
                     input: Mutex::new(Input::default()),
                 });
-                let tick = Interval::new(Duration::from_float_secs(1.0 / 10.0));
+                let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.
                 self.timer.cancel_timeout(timeout);
                 info!("setting first tick timeout in {:?}", tick.interval());

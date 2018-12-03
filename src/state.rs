@@ -49,7 +49,7 @@ pub enum GameState {
 
 impl ConnectingState {
     fn host(addr: SocketAddr) -> Result<ConnectingState, networking::Error> {
-        let server = server::host(addr)?;
+        let (server, _) = server::host(addr)?;
         let (client, connecting) = client::connect(addr)?;
         Ok(ConnectingState {
             server: Some(server),

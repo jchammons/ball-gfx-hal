@@ -32,7 +32,8 @@ int_hash = "0.1.1"
 mio = "0.6.16"
 mio-extras = "2.0.5"
 byteorder = "1.2.7"
-crossbeam = "0.5.0"
+structopt = "0.2.13"
+ctrlc = "3.1.1"
 
 [build-dependencies]
 shaderc = "0.3.12"

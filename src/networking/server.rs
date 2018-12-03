@@ -16,7 +16,7 @@ use std::io;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::mpsc::TryRecvError;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const SOCKET: Token = Token(0);
@@ -60,7 +60,7 @@ pub struct Server {
 }
 
 pub struct ServerHandle {
-    shutdown: Sender<()>,
+    pub shutdown: Sender<()>,
 }
 
 impl Client {
@@ -89,20 +89,23 @@ impl Client {
 }
 
 /// Launches a server bound to a particular address.
-pub fn host(addr: SocketAddr) -> Result<ServerHandle, Error> {
+pub fn host(addr: SocketAddr) -> Result<(ServerHandle, JoinHandle<()>), Error> {
     let (shutdown_tx, shutdown_rx) = channel::channel();
     let mut server = Server::new(&addr, shutdown_rx)?;
-    thread::spawn(move || {
+    let thread = thread::spawn(move || {
         run_event_loop(&mut server);
     });
-    Ok(ServerHandle {
-        shutdown: shutdown_tx,
-    })
+    Ok((
+        ServerHandle {
+            shutdown: shutdown_tx,
+        },
+        thread,
+    ))
 }
 
 impl ServerHandle {
     /// Attmepts to signal the associated server to shutdown.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
         let _ = self.shutdown.send(());
     }
 }
