@@ -1,5 +1,5 @@
-use cgmath::Point2;
 use crate::graphics::{select_memory_type, DrawContext, Graphics, GLOBAL_UBO_SIZE};
+use cgmath::Point2;
 use gfx_hal::{
     buffer::{Access, Usage},
     command::BufferCopy,
@@ -14,7 +14,7 @@ use gfx_hal::{
     },
     Backend, DescriptorPool, Device, Primitive, Submission,
 };
-use palette::Srgb;
+use palette::LinSrgb;
 use std::mem;
 
 #[derive(Copy, Clone, Debug)]
@@ -27,7 +27,7 @@ struct Vertex {
 pub struct Circle {
     pub center: Point2<f32>,
     pub radius: f32,
-    pub color: Srgb,
+    pub color: LinSrgb,
 }
 
 const VERTS: [Vertex; 4] = [

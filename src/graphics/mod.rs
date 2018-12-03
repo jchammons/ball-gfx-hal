@@ -374,7 +374,7 @@ impl<B: Backend> Graphics<B> {
             .collect();
 
         let present_mode = if vsync {
-            PresentMode::Relaxed
+            PresentMode::Fifo
         } else {
             PresentMode::Immediate
         };
@@ -417,11 +417,21 @@ impl<B: Backend> Graphics<B> {
 
     pub fn set_vsync(&mut self, vsync: bool) {
         self.present_mode = if vsync {
-            PresentMode::Relaxed
+            PresentMode::Fifo
         } else {
             PresentMode::Immediate
         };
         self.swapchain_update = true;
+    }
+
+    /// Waits until the buffers for a new frame open up.
+    ///
+    /// This is useful to avoid input lag, since ideally inputs will
+    /// be processed right before rendering, so delaying inside
+    /// `draw_frame` is undesirable.
+    pub fn wait_for_frame(&self) {
+        let frame_fence = &self.frame_fences[self.current_frame];
+        self.device.wait_for_fence(frame_fence, !0).unwrap();
     }
 
     pub fn draw_frame<F: FnOnce(DrawContext<B>)>(&mut self, ui: Ui, draw_fn: F) -> Result<(), ()> {
@@ -431,6 +441,7 @@ impl<B: Backend> Graphics<B> {
         let frame_finished_semaphore = &self.frame_finished_semaphores[self.current_frame];
 
         // Make sure there are no more than MAX_FRAMES frames in flight.
+        // TODO: somehow check that `wait_for_frame` has already been run.
         self.device.wait_for_fence(frame_fence, !0).unwrap();
         self.device.reset_fence(frame_fence).unwrap();
         self.frame_command_pools[self.current_frame].reset();
