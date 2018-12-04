@@ -17,7 +17,7 @@ use gfx_hal::{
 };
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
-use log::error;
+use log::{error, info};
 use std::mem;
 use take_mut;
 
@@ -215,7 +215,7 @@ impl<B: Backend> Graphics<B> {
         instance: I,
         mut surface: B::Surface,
         imgui: &mut ImGui,
-        vsync: bool,
+        present_mode: PresentMode,
     ) -> Graphics<B> {
         let mut adapters = instance.enumerate_adapters().into_iter();
 
@@ -373,11 +373,6 @@ impl<B: Backend> Graphics<B> {
             })
             .collect();
 
-        let present_mode = if vsync {
-            PresentMode::Fifo
-        } else {
-            PresentMode::Immediate
-        };
         let swapchain_state = SwapchainState::new(
             &device,
             physical_device,
@@ -415,12 +410,8 @@ impl<B: Backend> Graphics<B> {
         }
     }
 
-    pub fn set_vsync(&mut self, vsync: bool) {
-        self.present_mode = if vsync {
-            PresentMode::Fifo
-        } else {
-            PresentMode::Immediate
-        };
+    pub fn set_present_mode(&mut self, present_mode: PresentMode) {
+        self.present_mode = present_mode;
         self.swapchain_update = true;
     }
 
@@ -601,7 +592,7 @@ impl<B: Backend> Graphics<B> {
             frame_index,
             [frame_finished_semaphore].into_iter().cloned(),
         ) {
-            error!("Error occurred while presenting swapchain.");
+            error!("error occurred while presenting swapchain");
             // TODO: detect if it's a bad swapchain error or not
             self.swapchain_update = true;
             return Err(());
@@ -664,12 +655,16 @@ impl<B: Backend> SwapchainState<B> {
         present_mode: PresentMode,
     ) -> SwapchainState<B> {
         let (caps, _, _) = surface.compatibility(physical_device);
+        let extent = caps.current_extent.unwrap();
         let swapchain_config =
-            SwapchainConfig::from_caps(&caps, color_format).with_mode(present_mode);
+            SwapchainConfig::from_caps(&caps, color_format, extent).with_mode(present_mode);
         let (swapchain, backbuffer) = device
             .create_swapchain(surface, swapchain_config, None)
             .unwrap();
-        let extent = caps.current_extent.unwrap();
+        info!(
+            "building swapchain at extent {},{}",
+            extent.width, extent.height
+        );
 
         let (frame_views, framebuffers) = match backbuffer {
             Backbuffer::Images(images) => {
