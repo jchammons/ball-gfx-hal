@@ -309,6 +309,7 @@ impl Client {
                     players: Mutex::new(handshake.players),
                     snapshots: Mutex::new(DoubleBuffer::new((handshake.snapshot, Instant::now()))),
                     input: Input::default(),
+                    client_player: handshake.id,
                 });
                 let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.

@@ -43,6 +43,8 @@ pub struct Snapshot {
 pub struct InterpolatedSnapshot<'a> {
     alpha: f32,
     snapshots: MutexGuard<'a, DoubleBuffer<(Snapshot, Instant)>>,
+    client_player: PlayerId,
+    client_snapshot: PlayerSnapshot,
 }
 
 #[derive(Debug)]
@@ -62,6 +64,7 @@ pub struct GameClient {
     pub players: Mutex<IntHashMap<PlayerId, PlayerClient>>,
     pub snapshots: Mutex<DoubleBuffer<(Snapshot, Instant)>>,
     pub input: Input,
+    pub client_player: PlayerId,
 }
 
 #[derive(Debug)]
@@ -149,15 +152,22 @@ impl<'a> InterpolatedSnapshot<'a> {
             .0
             .players
             .iter()
-            .map(
-                move |(&id, new)| match self.snapshots.get_old().0.players.get(&id) {
-                    Some(old) => (id, old.lerp(new, self.alpha)),
-                    None => (id, new.clone()),
-                },
-            )
+            .map(move |(&id, new)| {
+                if id == self.client_player {
+                    (id, self.client_snapshot.clone())
+                } else {
+                    match self.snapshots.get_old().0.players.get(&id) {
+                        Some(old) => (id, old.lerp(new, self.alpha)),
+                        None => (id, new.clone()),
+                    }
+                }
+            })
     }
 
     pub fn player(&self, id: PlayerId) -> Option<PlayerSnapshot> {
+        if id == self.client_player {
+            return Some(self.client_snapshot.clone());
+        }
         self.snapshots.get().0.players.get(&id).map(|new| {
             match self.snapshots.get_old().0.players.get(&id) {
                 Some(old) => old.lerp(new, self.alpha),
@@ -214,6 +224,10 @@ impl GameClient {
         InterpolatedSnapshot {
             alpha: alpha as f32,
             snapshots,
+            client_player: self.client_player,
+            client_snapshot: PlayerSnapshot {
+                position: self.input.position(),
+            },
         }
     }
 }
