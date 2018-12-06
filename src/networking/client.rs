@@ -5,6 +5,7 @@ use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
+use cgmath::Point2;
 use log::{debug, error, info, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
@@ -14,7 +15,6 @@ use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
-use std::mem;
 use std::net::SocketAddr;
 use std::sync::mpsc::{
     self as std_channel, Receiver as StdReceiver, Sender as StdSender, TryRecvError,
@@ -35,7 +35,7 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
-    Input(Input),
+    Input { position: Point2<f32> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -272,12 +272,10 @@ impl Client {
                 let interval = tick.next(now);
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
-                let input = {
-                    let mut input = game.input.lock();
-                    mem::replace(&mut *input, Input::default())
+                let packet = ClientPacket::Input {
+                    position: game.input.position(),
                 };
-                debug!("sending inputs to server: {:?}", input);
-                let packet = ClientPacket::Input(input);
+                debug!("sending tick packet to server: {:?}", packet);
                 let packet_len = bincode::serialized_size(&packet).map_err(Error::serialize)?;
                 let mut buf = Vec::with_capacity(HEADER_BYTES + packet_len as usize);
                 connection.send_header(&mut buf)?;
@@ -310,7 +308,7 @@ impl Client {
                 let game = Arc::new(GameClient {
                     players: Mutex::new(handshake.players),
                     snapshots: Mutex::new(DoubleBuffer::new((handshake.snapshot, Instant::now()))),
-                    input: Mutex::new(Input::default()),
+                    input: Input::default(),
                 });
                 let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.

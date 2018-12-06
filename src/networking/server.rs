@@ -307,9 +307,9 @@ impl Server {
             Some(client) => {
                 // Existing player.
                 match client.decode(packet)? {
-                    ClientPacket::Input(input) => {
+                    ClientPacket::Input { position } => {
                         if let Some(player) = self.game.players.get_mut(&client.player) {
-                            player.input(&input);
+                            player.position = position;
                         }
                     }
                 }

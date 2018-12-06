@@ -1,4 +1,4 @@
-use crate::game::{GameClient, Input};
+use crate::game::GameClient;
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
@@ -94,9 +94,7 @@ impl GameState {
                         scale * (position.x as f32 - 0.5 * size.width as f32),
                         scale * (position.y as f32 - 0.5 * size.height as f32),
                     );
-                    game.input(Input {
-                        position: Some(position),
-                    });
+                    game.update_position(position);
                 }
                 _ => (),
             },

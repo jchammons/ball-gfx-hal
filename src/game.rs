@@ -1,4 +1,5 @@
 use crate::double_buffer::DoubleBuffer;
+use atomic::{Atomic, Ordering};
 use cgmath::Point2;
 use int_hash::IntHashMap;
 use palette::LinSrgb;
@@ -44,9 +45,9 @@ pub struct InterpolatedSnapshot<'a> {
     snapshots: MutexGuard<'a, DoubleBuffer<(Snapshot, Instant)>>,
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Debug)]
 pub struct Input {
-    pub position: Option<Point2<f32>>,
+    position: Atomic<Point2<f32>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,7 +61,7 @@ pub enum Event {
 pub struct GameClient {
     pub players: Mutex<IntHashMap<PlayerId, PlayerClient>>,
     pub snapshots: Mutex<DoubleBuffer<(Snapshot, Instant)>>,
-    pub input: Mutex<Input>,
+    pub input: Input,
 }
 
 #[derive(Debug)]
@@ -95,9 +96,21 @@ impl Interpolate for &PlayerSnapshot {
     }
 }
 
+impl Default for Input {
+    fn default() -> Input {
+        Input {
+            position: Atomic::new(Point2::new(0.0, 0.0)),
+        }
+    }
+}
+
 impl Input {
-    pub fn combine(&mut self, input: Input) {
-        self.position = input.position.or(self.position);
+    pub fn set_position(&self, position: Point2<f32>) {
+        self.position.store(position, Ordering::Release)
+    }
+
+    pub fn position(&self) -> Point2<f32> {
+        self.position.load(Ordering::Acquire)
     }
 }
 
@@ -112,12 +125,6 @@ impl Player {
 
     pub fn as_client(&self) -> PlayerClient {
         PlayerClient { color: self.color }
-    }
-
-    pub fn input(&mut self, input: &Input) {
-        if let Some(position) = input.position {
-            self.position = position;
-        }
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
@@ -175,8 +182,8 @@ impl GameClient {
         }*/
     }
 
-    pub fn input(&self, input: Input) {
-        self.input.lock().combine(input);
+    pub fn update_position(&self, position: Point2<f32>) {
+        self.input.set_position(position);
     }
 
     /// This locks the snapshot mutex and returns a lazy struct that
