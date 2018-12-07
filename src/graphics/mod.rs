@@ -380,6 +380,7 @@ impl<B: Backend> Graphics<B> {
             &render_pass,
             color_format,
             present_mode,
+            None,
         );
 
         Graphics {
@@ -454,7 +455,6 @@ impl<B: Backend> Graphics<B> {
                 } = self;
                 device.wait_idle().unwrap();
                 take_mut::take(swapchain_state, |old| {
-                    old.destroy(device);
                     let swapchain_state = SwapchainState::new(
                         device,
                         &adapter.physical_device,
@@ -462,7 +462,9 @@ impl<B: Backend> Graphics<B> {
                         render_pass,
                         *color_format,
                         *present_mode,
+                        Some(old),
                     );
+                    //old.destroy(device);
                     swapchain_state
                 });
             }
@@ -653,6 +655,7 @@ impl<B: Backend> SwapchainState<B> {
         render_pass: &B::RenderPass,
         color_format: Format,
         present_mode: PresentMode,
+        old: Option<SwapchainState<B>>,
     ) -> SwapchainState<B> {
         let (caps, _, _) = surface.compatibility(physical_device);
         let extent = caps.current_extent.unwrap();
@@ -662,13 +665,25 @@ impl<B: Backend> SwapchainState<B> {
             image_count: MAX_FRAMES as u32,
             ..SwapchainConfig::from_caps(&caps, color_format, extent)
         };
-        let (swapchain, backbuffer) = device
-            .create_swapchain(surface, swapchain_config, None)
-            .unwrap();
         info!(
             "building swapchain at extent {},{}",
-            extent.width, extent.height
+            extent.width, extent.height,
         );
+
+        // Destroy the old buffers, but keep the swapchain itself around
+        let old = old.map(|old| {
+            for framebuffer in old.framebuffers {
+                device.destroy_framebuffer(framebuffer);
+            }
+            for image_view in old.frame_views {
+                device.destroy_image_view(image_view);
+            }
+            old.swapchain
+        });
+
+        let (swapchain, backbuffer) = device
+            .create_swapchain(surface, swapchain_config, old)
+            .unwrap();
 
         let (frame_views, framebuffers) = match backbuffer {
             Backbuffer::Images(images) => {
