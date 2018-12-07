@@ -163,10 +163,17 @@ impl<B: Backend> QueueGroups<B> {
     /// Gets the main transfer command queue.
     ///
     /// If there is not a separate transfer queue, this is the second
-    /// graphics queue.
+    /// graphics queue. If there is only one graphics queue, it just
+    /// returns the same queue as a call to `graphics_queue`
     pub fn transfer_queue(&mut self) -> &mut CommandQueue<B, gfx_hal::Transfer> {
         match self {
-            QueueGroups::Single(graphics) => graphics.queues[1].downgrade(),
+            QueueGroups::Single(graphics) => {
+                if graphics.queues.len() > 1 {
+                    graphics.queues[1].downgrade()
+                } else {
+                    graphics.queues[0].downgrade()
+                }
+            }
             QueueGroups::Separate { transfer, .. } => &mut transfer.queues[0],
         }
     }
