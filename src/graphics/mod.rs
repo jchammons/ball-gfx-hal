@@ -656,8 +656,12 @@ impl<B: Backend> SwapchainState<B> {
     ) -> SwapchainState<B> {
         let (caps, _, _) = surface.compatibility(physical_device);
         let extent = caps.current_extent.unwrap();
-        let swapchain_config =
-            SwapchainConfig::from_caps(&caps, color_format, extent).with_mode(present_mode);
+        assert!(caps.image_count.contains(&(MAX_FRAMES as u32)));
+        let swapchain_config = SwapchainConfig {
+            present_mode,
+            image_count: MAX_FRAMES as u32,
+            ..SwapchainConfig::from_caps(&caps, color_format, extent)
+        };
         let (swapchain, backbuffer) = device
             .create_swapchain(surface, swapchain_config, None)
             .unwrap();
