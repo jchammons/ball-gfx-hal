@@ -297,7 +297,7 @@ impl<B: Backend> CircleRenderer<B> {
         }
     }
 
-    pub fn draw(&mut self, ctx: &mut DrawContext<B>, circles: &[Circle]) {
+    pub fn draw<I: IntoIterator<Item = Circle>>(&mut self, ctx: &mut DrawContext<B>, circles: I) {
         if ctx.update_viewport {
             let pipeline = create_pipeline::<B>(
                 ctx.device,
@@ -321,7 +321,7 @@ impl<B: Backend> CircleRenderer<B> {
             Some(&self.global_ubo_descriptor_set),
             None as Option<u32>,
         );
-        for circle in circles.iter() {
+        for circle in circles {
             let push_constants = [
                 circle.radius,
                 0.0, // padding

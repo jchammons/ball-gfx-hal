@@ -10,6 +10,7 @@ use gfx_hal::Backend;
 use imgui::{im_str, ImString, Ui};
 use log::{error, warn};
 use palette::LinSrgb;
+use std::iter;
 use std::marker::PhantomData;
 use std::mem;
 use std::net::SocketAddr;
@@ -194,25 +195,22 @@ impl GameState {
     ) {
         match self {
             GameState::MainMenu { .. } => {
-                let circles = [BOUNDS_CIRCLE];
-                circle_rend.draw(ctx, &circles);
+                circle_rend.draw(ctx, iter::once(BOUNDS_CIRCLE));
             }
             GameState::InGame { game, .. } => {
-                let mut circles = Vec::new();
-                circles.push(BOUNDS_CIRCLE);
                 let players = game.players.lock();
                 let snapshot = game.interpolate_snapshot(now);
-                for (id, player) in snapshot.players() {
-                    if let Some(&PlayerClient { color, .. }) = players.get(&id) {
-                        let player = Circle {
+                let circles = iter::once(BOUNDS_CIRCLE).chain(snapshot.players().filter_map(
+                    |(id, player)| {
+                        players.get(&id).map(|&PlayerClient { color, .. }| Circle {
                             center: player.position,
                             radius: 0.1,
                             color,
-                        };
-                        circles.push(player);
-                    }
-                }
-                circle_rend.draw(ctx, &circles);
+                        })
+                    },
+                ));
+
+                circle_rend.draw(ctx, circles);
             }
         }
     }
