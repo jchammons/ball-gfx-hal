@@ -15,13 +15,9 @@ pub struct Connection {
 
 impl Default for Connection {
     fn default() -> Connection {
-        // Sequences start at one since 0 was the handshake.
-
-        // TODO: if handshake is sent through the connection, switch
-        // back to 0
         Connection {
-            local_sequence: 1,
-            remote_sequence: 1,
+            local_sequence: 0,
+            remote_sequence: 0,
             acks: 0,
         }
     }
