@@ -138,14 +138,13 @@ impl EventHandler for Client {
                                 error!("error sending tick packet: {}", err);
                             }
                         }
-                        TimeoutState::Connect => match self.state {
-                            ClientState::Connecting { ref mut done, .. } => {
+                        TimeoutState::Connect => {
+                            if let ClientState::Connecting { ref mut done, .. } = self.state {
                                 let _ = done.send(Err(Error::TimedOut));
                                 info!("client connection timed out");
                                 return true;
                             }
-                            _ => (),
-                        },
+                        }
                     }
                 }
             }
@@ -326,7 +325,7 @@ impl Client {
                     game,
                     tick,
                     snapshot_seq_ids: DoubleBuffer::new(0),
-                    connection: Connection::new(),
+                    connection: Connection::default(),
                 })
             }
 
@@ -369,7 +368,7 @@ impl Client {
                     ServerPacket::PlayerLeft(id) => {
                         info!("player {} left", id);
                         let mut players = game.players.lock();
-                        if let None = players.remove(&id) {
+                        if players.remove(&id).is_none() {
                             warn!("server says player {} left, but client didn't register that player at all", id);
                         }
                     }

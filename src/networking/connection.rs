@@ -13,8 +13,8 @@ pub struct Connection {
     acks: u32,
 }
 
-impl Connection {
-    pub fn new() -> Connection {
+impl Default for Connection {
+    fn default() -> Connection {
         // Sequences start at one since 0 was the handshake.
 
         // TODO: if handshake is sent through the connection, switch
@@ -25,7 +25,9 @@ impl Connection {
             acks: 0,
         }
     }
+}
 
+impl Connection {
     /// Processes the header of a received packet and returns it's
     /// sequence number.
     pub fn recv_header<B: Read>(&mut self, mut packet: B) -> Result<u32, Error> {
