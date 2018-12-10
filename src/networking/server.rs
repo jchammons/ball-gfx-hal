@@ -47,11 +47,24 @@ struct Client {
     connection: Connection,
 }
 
+/// Contains a message and a list of clients to send the message to.
+struct Packet {
+    /// Current client with the correct header.
+    pub client: SocketAddr,
+    /// Clients left to send to.
+    remaining: Vec<SocketAddr>,
+    /// The packet is assumed to have room reserved at the front for a
+    /// header. Every time a new client is sent to, these bytes get
+    /// overwritten with the new header. This means that the previous
+    /// `packet` stops being correct.
+    pub packet: Vec<u8>,
+}
+
 pub struct Server {
     socket: UdpSocket,
     timer: Timer<TimeoutState>,
     recv_buffer: [u8; MAX_PACKET_SIZE],
-    send_queue: VecDeque<(SocketAddr, Vec<u8>)>,
+    send_queue: VecDeque<Packet>,
     clients: HashMap<SocketAddr, Client>,
     game: GameServer,
     tick: Interval,
@@ -70,14 +83,6 @@ impl Client {
             player,
             connection: Connection::default(),
         }
-    }
-
-    fn encode<P: Serialize>(&mut self, packet: &P) -> Result<Vec<u8>, Error> {
-        let size = bincode::serialized_size(packet).map_err(Error::serialize)?;
-        let mut buf = Vec::with_capacity(HEADER_BYTES + size as usize);
-        self.connection.send_header(&mut buf)?;
-        bincode::serialize_into(&mut buf, packet).map_err(Error::serialize)?;
-        Ok(buf)
     }
 
     fn decode<'a, P: DeserializeOwned>(&mut self, packet: &'a [u8]) -> Result<P, Error> {
@@ -114,6 +119,53 @@ impl ServerHandle {
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+impl Packet {
+    /// Poossibly constructs a new packet, but returns `None` if
+    /// `clients` is empty.
+    pub fn new<I: IntoIterator<Item = SocketAddr>, P: Serialize>(
+        clients: I,
+        contents: &P,
+        clients_state: &mut HashMap<SocketAddr, Client>,
+    ) -> Result<Option<Packet>, Error> {
+        // Determine first client, to write the header for.
+        let mut clients = clients.into_iter();
+        let client = match clients.next() {
+            Some(client) => client,
+            None => return Ok(None),
+        };
+
+        // Write header and contents
+        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let mut packet = Vec::with_capacity(size + HEADER_BYTES);
+        let client_state = clients_state.get_mut(&client).unwrap();
+        client_state.connection.send_header(&mut packet)?;
+        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
+
+        Ok(Some(Packet {
+            client,
+            remaining: clients.collect(),
+            packet,
+        }))
+    }
+
+    pub fn next_packet(
+        &mut self,
+        clients_state: &mut HashMap<SocketAddr, Client>,
+    ) -> Result<bool, Error> {
+        match self.remaining.pop() {
+            Some(client) => {
+                self.client = client;
+                // Write the new header.
+                let connection = &mut clients_state.get_mut(&client).unwrap().connection;
+                let cursor = Cursor::new(&mut self.packet[..HEADER_BYTES]);
+                connection.send_header(cursor)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -214,25 +266,41 @@ impl Server {
     }
 
     fn socket_writable(&mut self) {
-        while let Some((addr, packet)) = self.send_queue.pop_front() {
-            match self.socket.send_to(&packet, &addr) {
+        while let Some(packet) = self.send_queue.front_mut() {
+            match self.socket.send_to(&packet.packet, &packet.client) {
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
-                        error!("error sending packet to {} ({}): {:?}", addr, err, &packet);
+                        error!(
+                            "error sending packet to {} ({}): {:?}",
+                            &packet.client, err, &packet.packet
+                        );
                     }
                     break;
                 }
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
-                    if bytes_written < packet.len() {
+                    if bytes_written < packet.packet.len() {
                         error!(
-                            "Only wrote {} out of {} bytes for packet to {}: {:?}",
+                            "only wrote {} out of {} bytes for packet to {}: {:?}",
                             bytes_written,
-                            packet.len(),
-                            addr,
-                            &packet
+                            packet.packet.len(),
+                            &packet.client,
+                            &packet.packet
                         )
                     }
+                }
+            }
+
+            // If it got here, the packet must have actually been sent.
+            match packet.next_packet(&mut self.clients) {
+                Ok(true) => {
+                    // Continue as usual.
+                }
+                Ok(false) => {
+                    self.send_queue.pop_front().unwrap();
+                }
+                Err(err) => {
+                    error!("error writing header for packet: {}", err);
                 }
             }
         }
@@ -240,11 +308,7 @@ impl Server {
         if self.send_queue.is_empty() {
             // No longer care about writable events if there are no
             // more packets to send.
-            if let Err(err) = self
-                .poll
-                .reregister(&self.socket, SOCKET, Ready::readable(), PollOpt::edge())
-                .map_err(Error::poll_register)
-            {
+            if let Err(err) = self.reregister_socket(false) {
                 error!("{}", err);
             }
         }
@@ -258,7 +322,6 @@ impl Server {
 
         debug!("sending snapshot to clients");
         let packet = ServerPacket::Snapshot(self.game.snapshot());
-        let packet = bincode::serialize(&packet).map_err(Error::serialize)?;
         self.broadcast(&packet)?;
 
         Ok(())
@@ -267,10 +330,11 @@ impl Server {
     fn new_client(&mut self, addr: SocketAddr) -> Result<(), Error> {
         info!("new player from {}", addr);
         let player = self.game.add_player();
-        let client = Client::new(player);
+        // Now start processing this client.
+        self.clients.insert(addr, Client::new(player));
 
         // Send handshake message to the new client.
-        let handshake = ServerHandshake {
+        let packet = ServerHandshake {
             id: player,
             players: self
                 .game
@@ -280,19 +344,14 @@ impl Server {
                 .collect(),
             snapshot: self.game.snapshot(),
         };
-        let packet = bincode::serialize(&handshake).map_err(Error::serialize)?;
-        self.send_to(addr, packet)?;
+        self.send_to(addr, &packet)?;
 
-        // Broadcast join message to the other clients.
+        // Broadcast join message to the every other client.
         let packet = ServerPacket::PlayerJoined {
             id: player,
             player: self.game.players[&player].as_client(),
         };
-        let packet = bincode::serialize(&packet).map_err(Error::serialize)?;
-        self.broadcast(&packet)?;
-
-        // Now start processing this client.
-        self.clients.insert(addr, client);
+        self.broadcast_filter(|client_addr, _| client_addr != &addr, &packet)?;
 
         Ok(())
     }
@@ -323,40 +382,61 @@ impl Server {
         Ok(())
     }
 
-    fn send_to(&mut self, addr: SocketAddr, packet: Vec<u8>) -> Result<(), Error> {
-        self.send_queue.push_back((addr, packet));
-        self.poll
-            .reregister(
-                &self.socket,
-                SOCKET,
-                Ready::readable() | Ready::writable(),
-                PollOpt::edge(),
-            )
-            .map_err(Error::poll_register)?;
+    fn reregister_socket(&mut self, writable: bool) -> Result<(), Error> {
+        let readiness = if writable {
+            Ready::readable() | Ready::writable()
+        } else {
+            Ready::readable()
+        };
 
+        self.poll
+            .reregister(&self.socket, SOCKET, readiness, PollOpt::edge())
+            .map_err(Error::poll_register)
+    }
+
+    fn send_to<P: Serialize>(&mut self, addr: SocketAddr, packet: &P) -> Result<(), Error> {
+        self.send_queue
+            .push_back(Packet::new(Some(addr), packet, &mut self.clients)?.unwrap());
+        self.reregister_socket(true)?;
         Ok(())
     }
 
-    fn broadcast(&mut self, packet: &[u8]) -> Result<(), Error> {
-        for (addr, client) in self.clients.iter_mut() {
-            let mut with_header = Vec::with_capacity(HEADER_BYTES + packet.len());
-            with_header.extend((0..HEADER_BYTES).map(|_| 0).chain(packet.iter().cloned()));
-            client
-                .connection
-                .send_header(&mut with_header[0..HEADER_BYTES])?;
-            self.send_queue.push_back((*addr, with_header));
+    fn broadcast<P: Serialize>(&mut self, packet: &P) -> Result<(), Error> {
+        self.send_queue.push_back(
+            Packet::new(
+                self.clients.keys().cloned().collect::<Vec<_>>(),
+                packet,
+                &mut self.clients,
+            )?
+            .unwrap(),
+        );
+        self.reregister_socket(true)?;
+        Ok(())
+    }
+
+    fn broadcast_filter<P: Serialize, F: Fn(&SocketAddr, &Client) -> bool>(
+        &mut self,
+        filter: F,
+        packet: &P,
+    ) -> Result<(), Error> {
+        let packet = Packet::new(
+            self.clients
+                .iter()
+                .filter_map(|(addr, client)| {
+                    if filter(addr, client) {
+                        Some(*addr)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+            packet,
+            &mut self.clients,
+        )?;
+        if let Some(packet) = packet {
+            self.send_queue.push_back(packet);
+            self.reregister_socket(true)?;
         }
-
-        // Only reregister once, at the very end.
-        self.poll
-            .reregister(
-                &self.socket,
-                SOCKET,
-                Ready::readable() | Ready::writable(),
-                PollOpt::edge(),
-            )
-            .map_err(Error::poll_register)?;
-
         Ok(())
     }
 }

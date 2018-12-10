@@ -12,7 +12,7 @@ use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self as mio_channel, Receiver as MioReceiver, Sender as MioSender};
 use mio_extras::timer::{self, Timeout, Timer};
 use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
@@ -47,7 +47,6 @@ pub enum ClientState {
         timeout: Timeout,
     },
     Connected {
-        connection: Connection,
         tick: Interval,
         snapshot_seq_ids: DoubleBuffer<u32>,
         game: Arc<GameClient>,
@@ -60,6 +59,7 @@ pub struct Client {
     recv_buffer: [u8; MAX_PACKET_SIZE],
     send_queue: VecDeque<Vec<u8>>,
     poll: Poll,
+    connection: Connection,
     state: ClientState,
     shutdown: MioReceiver<()>,
 }
@@ -193,12 +193,13 @@ impl Client {
             recv_buffer: [0; MAX_PACKET_SIZE],
             send_queue: VecDeque::new(),
             poll,
+            connection: Connection::default(),
             state: ClientState::Connecting { done, timeout },
             shutdown,
         };
 
         // Send handshake
-        client.send(vec![0])?;
+        client.send(&ClientHandshake)?;
 
         Ok(client)
     }
@@ -262,7 +263,6 @@ impl Client {
     fn send_tick(&mut self) -> Result<(), Error> {
         match self.state {
             ClientState::Connected {
-                ref mut connection,
                 ref mut tick,
                 ref game,
                 ..
@@ -275,12 +275,7 @@ impl Client {
                     position: game.input.position(),
                 };
                 debug!("sending tick packet to server: {:?}", packet);
-                let packet_len = bincode::serialized_size(&packet).map_err(Error::serialize)?;
-                let mut buf = Vec::with_capacity(HEADER_BYTES + packet_len as usize);
-                connection.send_header(&mut buf)?;
-                bincode::serialize_into(&mut buf, &packet).map_err(Error::serialize)?;
-
-                self.send(buf)?;
+                self.send(&packet)?;
             }
             // We shouldn't really be sending ticks in any other state.
             _ => unreachable!(),
@@ -302,8 +297,10 @@ impl Client {
                 ref timeout,
             } => {
                 // Assumed to be a handshake packet.
+                let mut cursor = Cursor::new(packet);
+                let sequence = self.connection.recv_header(&mut cursor)?;
                 let handshake: ServerHandshake =
-                    bincode::deserialize(packet).map_err(Error::deserialize)?;
+                    bincode::deserialize_from(&mut cursor).map_err(Error::deserialize)?;
                 let game = Arc::new(GameClient {
                     players: Mutex::new(handshake.players),
                     snapshots: Mutex::new(DoubleBuffer::new((handshake.snapshot, Instant::now()))),
@@ -313,7 +310,6 @@ impl Client {
                 let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.
                 self.timer.cancel_timeout(timeout);
-                info!("setting first tick timeout in {:?}", tick.interval());
                 self.timer.set_timeout(tick.interval(), TimeoutState::Tick);
 
                 // Signal the main thread that connection finished.
@@ -324,19 +320,17 @@ impl Client {
                 Some(ClientState::Connected {
                     game,
                     tick,
-                    snapshot_seq_ids: DoubleBuffer::new(0),
-                    connection: Connection::default(),
+                    snapshot_seq_ids: DoubleBuffer::new(sequence),
                 })
             }
 
             ClientState::Connected {
                 ref mut game,
-                ref mut connection,
                 ref mut snapshot_seq_ids,
                 ..
             } => {
                 let mut read = Cursor::new(packet);
-                let sequence = connection.recv_header(&mut read)?;
+                let sequence = self.connection.recv_header(&mut read)?;
                 let packet = bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
 
                 match packet {
@@ -385,7 +379,11 @@ impl Client {
         Ok(())
     }
 
-    fn send(&mut self, packet: Vec<u8>) -> Result<(), Error> {
+    fn send<P: Serialize>(&mut self, contents: &P) -> Result<(), Error> {
+        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let mut packet = Vec::with_capacity(size + HEADER_BYTES);
+        self.connection.send_header(&mut packet)?;
+        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
         self.send_queue.push_back(packet);
         self.poll
             .reregister(
