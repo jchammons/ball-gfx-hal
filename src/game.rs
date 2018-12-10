@@ -259,4 +259,8 @@ impl GameServer {
         self.players.insert(id, Player::with_random_color());
         id
     }
+
+    pub fn remove_player(&mut self, id: PlayerId) {
+        self.players.remove(&id);
+    }
 }

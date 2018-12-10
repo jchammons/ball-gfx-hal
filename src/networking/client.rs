@@ -36,6 +36,7 @@ enum TimeoutState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
     Input { position: Point2<f32> },
+    Disconnect,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,6 +63,9 @@ pub struct Client {
     connection: Connection,
     state: ClientState,
     shutdown: MioReceiver<()>,
+    /// Marks after `shutdown` has been received, to shutdown when the
+    /// `send_queue` is empty.
+    needs_shutdown: bool,
 }
 
 /// Client handle used while connecting to a sever.
@@ -129,6 +133,12 @@ impl EventHandler for Client {
                 if event.readiness().is_writable() {
                     self.socket_writable();
                 }
+
+                if self.send_queue.is_empty() && self.needs_shutdown {
+                    // Finished sending all pending messages so shut
+                    // down for real.
+                    return true;
+                }
             }
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
@@ -149,13 +159,14 @@ impl EventHandler for Client {
                 }
             }
             SHUTDOWN => match self.shutdown.try_recv() {
-                Ok(()) => {
-                    info!("client received shutdown from handle");
-                    return true;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    error!("client handle has disconnected without sending shutdown");
-                    return true;
+                Ok(()) | Err(TryRecvError::Disconnected) => {
+                    info!("client started shutdown");
+                    if let Err(err) = self.send(&ClientPacket::Disconnect) {
+                        error!("failed to send disconnect packet: {}", err);
+                        // If this errored, just shut down immediately.
+                        return true;
+                    }
+                    self.needs_shutdown = true;
                 }
                 Err(TryRecvError::Empty) => (),
             },
@@ -196,6 +207,7 @@ impl Client {
             connection: Connection::default(),
             state: ClientState::Connecting { done, timeout },
             shutdown,
+            needs_shutdown: false,
         };
 
         // Send handshake
@@ -380,6 +392,11 @@ impl Client {
     }
 
     fn send<P: Serialize>(&mut self, contents: &P) -> Result<(), Error> {
+        // Don't send any additional packets while shutting down.
+        if self.needs_shutdown {
+            return Ok(());
+        }
+
         let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
         self.connection.send_header(&mut packet)?;

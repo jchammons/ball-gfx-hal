@@ -1,4 +1,4 @@
-use crate::game::GameClient;
+use crate::game::{GameClient, PlayerClient};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
@@ -203,12 +203,14 @@ impl GameState {
                 let players = game.players.lock();
                 let snapshot = game.interpolate_snapshot(now);
                 for (id, player) in snapshot.players() {
-                    let player = Circle {
-                        center: player.position,
-                        radius: 0.1,
-                        color: players[&id].color,
-                    };
-                    circles.push(player);
+                    if let Some(&PlayerClient { color, .. }) = players.get(&id) {
+                        let player = Circle {
+                            center: player.position,
+                            radius: 0.1,
+                            color,
+                        };
+                        circles.push(player);
+                    }
                 }
                 circle_rend.draw(ctx, &circles);
             }

@@ -356,6 +356,18 @@ impl Server {
         Ok(())
     }
 
+    fn remove_client(&mut self, addr: &SocketAddr) -> Result<(), Error> {
+        let client = self.clients.remove(addr).unwrap();
+        info!("player {} from {} left", client.player, addr);
+        self.game.remove_player(client.player);
+
+        // Send disconnect message to rest of clients.
+        let packet = ServerPacket::PlayerLeft(client.player);
+        self.broadcast(&packet)?;
+
+        Ok(())
+    }
+
     fn on_recv(&mut self, addr: SocketAddr, bytes_read: usize) -> Result<(), Error> {
         if bytes_read > MAX_PACKET_SIZE {
             return Err(Error::PacketTooLarge(bytes_read));
@@ -370,6 +382,9 @@ impl Server {
                         if let Some(player) = self.game.players.get_mut(&client.player) {
                             player.position = position;
                         }
+                    }
+                    ClientPacket::Disconnect => {
+                        self.remove_client(&addr)?;
                     }
                 }
             }
