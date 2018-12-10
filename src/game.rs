@@ -2,7 +2,7 @@ use crate::double_buffer::DoubleBuffer;
 use atomic::{Atomic, Ordering};
 use cgmath::Point2;
 use int_hash::IntHashMap;
-use palette::LinSrgb;
+use palette::{LabHue, Lch, LinSrgb};
 use parking_lot::{Mutex, MutexGuard};
 use rand::{thread_rng, Rng};
 use serde_derive::{Deserialize, Serialize};
@@ -120,9 +120,10 @@ impl Input {
 impl Player {
     pub fn with_random_color() -> Player {
         let mut rng = thread_rng();
+        let hue = LabHue::from_degrees(rng.gen_range(0.0, 360.0));
         Player {
             position: Point2::new(0.0, 0.0),
-            color: LinSrgb::new(rng.gen(), rng.gen(), rng.gen()),
+            color: Lch::new(75.0, 80.0, hue).into(),
         }
     }
 
