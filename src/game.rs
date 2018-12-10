@@ -52,13 +52,6 @@ pub struct Input {
     position: Atomic<Point2<f32>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Event {
-    AddPlayer { id: PlayerId, player: PlayerClient },
-    RemovePlayer(PlayerId),
-    Snapshot(Snapshot),
-}
-
 #[derive(Debug)]
 pub struct GameClient {
     pub players: Mutex<IntHashMap<PlayerId, PlayerClient>>,
