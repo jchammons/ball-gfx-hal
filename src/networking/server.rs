@@ -68,7 +68,7 @@ impl Client {
         // Ignore the handshake for now.
         Client {
             player,
-            connection: Connection::new(),
+            connection: Connection::default(),
         }
     }
 
@@ -186,7 +186,7 @@ impl Server {
             recv_buffer: [0; MAX_PACKET_SIZE],
             send_queue: VecDeque::new(),
             clients: HashMap::new(),
-            game: GameServer::new(),
+            game: GameServer::default(),
             tick,
             poll,
             shutdown,

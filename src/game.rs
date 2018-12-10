@@ -118,7 +118,7 @@ impl Input {
 }
 
 impl Player {
-    pub fn new() -> Player {
+    pub fn with_random_color() -> Player {
         let mut rng = thread_rng();
         Player {
             position: Point2::new(0.0, 0.0),
@@ -232,14 +232,16 @@ impl GameClient {
     }
 }
 
-impl GameServer {
-    pub fn new() -> GameServer {
+impl Default for GameServer {
+    fn default() -> GameServer {
         GameServer {
             players: IntHashMap::default(),
             next_id: 0,
         }
     }
+}
 
+impl GameServer {
     /*pub fn tick(&mut self) {
         for (player, input) in inputs.iter_mut() {
             self.players.get_mut(input).unwrap().input(input);
@@ -260,7 +262,7 @@ impl GameServer {
     pub fn add_player(&mut self) -> PlayerId {
         let id = self.next_id;
         self.next_id += 1;
-        self.players.insert(id, Player::new());
+        self.players.insert(id, Player::with_random_color());
         id
     }
 }

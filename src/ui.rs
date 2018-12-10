@@ -1,6 +1,6 @@
 pub use imgui::{ImStr, Ui};
 
-pub fn enum_combo<'p, 't, 'ui, T: PartialEq + Eq + Copy>(
+pub fn enum_combo<'p, 'ui, T: PartialEq + Eq + Copy>(
     ui: &Ui<'ui>,
     label: &'p ImStr,
     current: &mut T,

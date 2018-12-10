@@ -145,7 +145,7 @@ impl GameState {
                 ui.window(im_str!("Main Menu"))
                     .always_auto_resize(true)
                     .build(|| {
-                        if let Some(_) = connecting {
+                        if connecting.is_some() {
                             ui.text(im_str!("Connecting..."));
                             ui.separator();
                         }
@@ -186,7 +186,7 @@ impl GameState {
         }
     }
 
-    pub fn draw<'a, B: Backend>(
+    pub fn draw<B: Backend>(
         &mut self,
         now: Instant,
         circle_rend: &mut CircleRenderer<B>,

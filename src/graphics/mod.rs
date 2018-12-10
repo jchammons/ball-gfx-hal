@@ -219,7 +219,7 @@ impl<B: Backend> QueueGroups<B> {
 
 impl<B: Backend> Graphics<B> {
     pub fn new<I: Instance<Backend = B>>(
-        instance: I,
+        instance: &I,
         mut surface: B::Surface,
         imgui: &mut ImGui,
         present_mode: PresentMode,
@@ -462,7 +462,7 @@ impl<B: Backend> Graphics<B> {
                 } = self;
                 device.wait_idle().unwrap();
                 take_mut::take(swapchain_state, |old| {
-                    let swapchain_state = SwapchainState::new(
+                    SwapchainState::new(
                         device,
                         &adapter.physical_device,
                         surface,
@@ -470,9 +470,7 @@ impl<B: Backend> Graphics<B> {
                         *color_format,
                         *present_mode,
                         Some(old),
-                    );
-                    //old.destroy(device);
-                    swapchain_state
+                    )
                 });
             }
 
@@ -489,8 +487,8 @@ impl<B: Backend> Graphics<B> {
                 let mut cbuf = self.transfer_command_pool.acquire_command_buffer(false);
 
                 let (width, height) = (
-                    self.swapchain_state.viewport.rect.w as f32,
-                    self.swapchain_state.viewport.rect.h as f32,
+                    f32::from(self.swapchain_state.viewport.rect.w),
+                    f32::from(self.swapchain_state.viewport.rect.h),
                 );
                 let scale = if height < width {
                     [height / width, 1.0]
@@ -596,11 +594,16 @@ impl<B: Backend> Graphics<B> {
         self.viewport_update = false;
         self.first_frame = false;
 
-        if let Err(_) = self.swapchain_state.swapchain.present(
-            &mut self.queue_groups.graphics_queue(),
-            frame_index,
-            [frame_finished_semaphore].into_iter().cloned(),
-        ) {
+        if self
+            .swapchain_state
+            .swapchain
+            .present(
+                &mut self.queue_groups.graphics_queue(),
+                frame_index,
+                [frame_finished_semaphore].iter().cloned(),
+            )
+            .is_err()
+        {
             error!("error occurred while presenting swapchain");
             // TODO: detect if it's a bad swapchain error or not
             self.swapchain_update = true;

@@ -62,7 +62,7 @@ fn create_pipeline<'a, B: Backend>(
     fs_module: &'a B::ShaderModule,
     pipeline_layout: &'a B::PipelineLayout,
     render_pass: &'a B::RenderPass,
-    viewport: Viewport,
+    viewport: &Viewport,
 ) -> B::GraphicsPipeline {
     let vs_entry = EntryPoint {
         entry: "main",
@@ -192,7 +192,7 @@ impl<B: Backend> CircleRenderer<B> {
                 &[BufferCopy {
                     src: 0,
                     dst: 0,
-                    size: size,
+                    size,
                 }],
             );
 
@@ -272,7 +272,7 @@ impl<B: Backend> CircleRenderer<B> {
             &fs_module,
             &pipeline_layout,
             &graphics.render_pass,
-            graphics.swapchain_state.viewport.clone(),
+            &graphics.swapchain_state.viewport,
         );
 
         // When transfer is finished, delete the staging buffers.
@@ -305,7 +305,7 @@ impl<B: Backend> CircleRenderer<B> {
                 &self.fs_module,
                 &self.pipeline_layout,
                 ctx.render_pass,
-                ctx.viewport.clone(),
+                &ctx.viewport,
             );
             let pipeline = mem::replace(&mut self.pipeline, pipeline);
             ctx.device.destroy_graphics_pipeline(pipeline);
@@ -313,7 +313,7 @@ impl<B: Backend> CircleRenderer<B> {
 
         // TODO: re-use command buffers
         ctx.encoder
-            .bind_vertex_buffers(0, [(&self.vertex_buffer, 0)].into_iter().cloned());
+            .bind_vertex_buffers(0, [(&self.vertex_buffer, 0)].iter().cloned());
         ctx.encoder.bind_graphics_pipeline(&self.pipeline);
         ctx.encoder.bind_graphics_descriptor_sets(
             &self.pipeline_layout,

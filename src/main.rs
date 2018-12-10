@@ -60,7 +60,7 @@ fn run_gui() {
 
     let instance = backend::Instance::create("Ball", 1);
     let surface = instance.create_surface(&window);
-    let mut graphics = graphics::Graphics::new(instance, surface, &mut imgui, present_mode);
+    let mut graphics = graphics::Graphics::new(&instance, surface, &mut imgui, present_mode);
     let mut circle_rend = graphics::CircleRenderer::new(&mut graphics);
 
     let mut renderdoc = graphics::renderdoc::init();
@@ -78,9 +78,8 @@ fn run_gui() {
 
             if let Event::WindowEvent { event, .. } = event {
                 game_state.handle_event(&window, &event);
-                match event {
-                    WindowEvent::CloseRequested => running = false,
-                    _ => (),
+                if let WindowEvent::CloseRequested = event {
+                    running = false;
                 }
             }
         });
@@ -137,11 +136,9 @@ fn run_gui() {
         });
         game_state.ui(&ui);
 
-        if let Err(_) = graphics.draw_frame(ui, |mut ctx| {
+        let _ = graphics.draw_frame(ui, |mut ctx| {
             game_state.draw(now, &mut circle_rend, &mut ctx);
-        }) {
-            // Ignore it for now?
-        }
+        });
     }
 
     circle_rend.destroy(&mut graphics);
