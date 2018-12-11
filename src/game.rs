@@ -1,22 +1,26 @@
 use crate::double_buffer::DoubleBuffer;
 use atomic::{Atomic, Ordering};
-use cgmath::{Point2, Vector2};
+use cgmath::{prelude::*, Point2, Vector2};
+use log::{debug, trace};
 use palette::{LabHue, Lch, LinSrgb};
 use parking_lot::{Mutex, MutexGuard};
 use rand::{thread_rng, Rng};
 use serde_derive::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::ops::{Add, Mul, Sub};
 use std::time::Instant;
 
-const SPRING_CONSTANT: f32 = 5.0;
+pub const BALL_RADIUS: f32 = 0.15;
+pub const CURSOR_RADIUS: f32 = 0.05;
+const SPRING_CONSTANT: f32 = 8.0;
 
 pub type PlayerId = u16;
 
 pub trait Interpolate {
     type Output;
 
-    fn lerp(self, other: Self, alpha: f32) -> Self::Output;
+    fn interpolate(self, other: Self, alpha: f32) -> Self::Output;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,7 +88,7 @@ where
 {
     type Output = T;
 
-    fn lerp(self, other: T, alpha: f32) -> T {
+    fn interpolate(self, other: T, alpha: f32) -> T {
         self.clone() + (other - self.clone()) * alpha
     }
 }
@@ -92,11 +96,11 @@ where
 impl Interpolate for &PlayerSnapshot {
     type Output = PlayerSnapshot;
 
-    fn lerp(self, other: &PlayerSnapshot, alpha: f32) -> PlayerSnapshot {
+    fn interpolate(self, other: &PlayerSnapshot, alpha: f32) -> PlayerSnapshot {
         PlayerSnapshot {
-            position: self.position.lerp(other.position, alpha),
-            position_ball: self.position_ball.lerp(other.position_ball, alpha),
-            velocity_ball: self.velocity_ball.lerp(other.velocity_ball, alpha),
+            position: self.position.interpolate(other.position, alpha),
+            position_ball: self.position_ball.interpolate(other.position_ball, alpha),
+            velocity_ball: self.velocity_ball.interpolate(other.velocity_ball, alpha),
         }
     }
 }
@@ -164,7 +168,7 @@ impl<'a> InterpolatedSnapshot<'a> {
                     (id, self.client_snapshot.clone())
                 } else {
                     match self.snapshots.get_old().0.players.get(&id) {
-                        Some(old) => (id, old.lerp(new, self.alpha)),
+                        Some(old) => (id, old.interpolate(new, self.alpha)),
                         None => (id, new.clone()),
                     }
                 }
@@ -177,7 +181,7 @@ impl<'a> InterpolatedSnapshot<'a> {
         }
         self.snapshots.get().0.players.get(&id).map(|new| {
             match self.snapshots.get_old().0.players.get(&id) {
-                Some(old) => old.lerp(new, self.alpha),
+                Some(old) => old.interpolate(new, self.alpha),
                 None => new.clone(),
             }
         })
@@ -283,10 +287,60 @@ impl Default for GameServer {
 
 impl GameServer {
     pub fn tick(&mut self, dt: f32) {
+        // Calculate springs and move balls.
         for player in self.players.values_mut() {
             let displacement = player.position_ball - player.position;
             player.velocity_ball -= SPRING_CONSTANT * displacement * dt;
             player.position_ball += player.velocity_ball * dt;
+        }
+
+        // Check for collisions.
+        let mut collisions = SmallVec::<[_; 2]>::new();
+        for (&id_a, a) in self.players.iter() {
+            for (&id_b, b) in self.players.iter() {
+                // This ensures every unordered pair only gets checked
+                // once.
+                if id_a < id_b {
+                    let a_to_b = b.position_ball - a.position_ball;
+                    let dist_sq = a_to_b.distance2(Vector2::zero());
+                    trace!("distance from {} to {}: {}", id_a, id_b, dist_sq.sqrt());
+                    if dist_sq < 4.0 * BALL_RADIUS * BALL_RADIUS {
+                        let penetration_dist = 2.0 * BALL_RADIUS - dist_sq.sqrt();
+                        debug!(
+                            "collision between {} and {} ({})",
+                            id_a, id_b, penetration_dist
+                        );
+                        let vel =
+                            a_to_b * (b.velocity_ball - a.velocity_ball).dot(a_to_b) / dist_sq;
+                        // Normalize using previously computed distance.
+                        collisions.push((
+                            id_a,
+                            id_b,
+                            penetration_dist,
+                            a_to_b / dist_sq.sqrt(),
+                            vel,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Process collisions
+        for (id_a, id_b, penetration, a_to_b, vel) in collisions.into_iter() {
+            let bounce = |player: &mut Player, sign| {
+                // Get penetration along the velocity vector.
+                let penetration_vel = 0.5 * player.velocity_ball.dot(a_to_b).abs() * penetration;
+                // Move player out of collision (* 0.5 because there are two balls).
+                player.position_ball -= player.velocity_ball.normalize_to(penetration_vel);
+                // Update velocity
+                player.velocity_ball -= sign * vel;
+                // Get penetration along the new velocity vector.
+                let penetration_vel = 0.5 * player.velocity_ball.dot(a_to_b).abs() * penetration;
+                // Repeat remaining movement in the new direction.
+                player.position_ball += player.velocity_ball.normalize_to(penetration_vel);
+            };
+            bounce(self.players.get_mut(&id_a).unwrap(), -1.0);
+            bounce(self.players.get_mut(&id_b).unwrap(), 1.0);
         }
     }
 

@@ -6,7 +6,7 @@ use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
 use cgmath::Point2;
-use log::{debug, error, info, warn};
+use log::{error, info, trace, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self as mio_channel, Receiver as MioReceiver, Sender as MioSender};
@@ -285,7 +285,7 @@ impl Client {
                 let packet = ClientPacket::Input {
                     position: game.input.position(),
                 };
-                debug!("sending tick packet to server: {:?}", packet);
+                trace!("sending tick packet to server: {:?}", packet);
                 self.send(&packet)?;
             }
             // We shouldn't really be sending ticks in any other state.
@@ -345,7 +345,7 @@ impl Client {
 
                 match packet {
                     ServerPacket::Snapshot(snapshot) => {
-                        debug!("got snapshot from server");
+                        trace!("got snapshot from server");
                         if sequence > *snapshot_seq_ids.get() {
                             // Things are normal, rotate the buffers
                             // as expected.
