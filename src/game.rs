@@ -294,7 +294,7 @@ impl GameServer {
             player.position_ball += player.velocity_ball * dt;
         }
 
-        // Check for collisions.
+        // Check for collisions between balls.
         let mut collisions = SmallVec::<[_; 2]>::new();
         for (&id_a, a) in self.players.iter() {
             for (&id_b, b) in self.players.iter() {
@@ -302,7 +302,7 @@ impl GameServer {
                 // once.
                 if id_a < id_b {
                     let a_to_b = b.position_ball - a.position_ball;
-                    let dist_sq = a_to_b.distance2(Vector2::zero());
+                    let dist_sq = a_to_b.magnitude2();
                     trace!("distance from {} to {}: {}", id_a, id_b, dist_sq.sqrt());
                     if dist_sq < 4.0 * BALL_RADIUS * BALL_RADIUS {
                         let penetration_dist = 2.0 * BALL_RADIUS - dist_sq.sqrt();
@@ -327,20 +327,41 @@ impl GameServer {
 
         // Process collisions
         for (id_a, id_b, penetration, a_to_b, vel) in collisions.into_iter() {
-            let bounce = |player: &mut Player, sign| {
+            let bounce = |player: &mut Player, sign: f32| {
                 // Get penetration along the velocity vector.
-                let penetration_vel = 0.5 * player.velocity_ball.dot(a_to_b).abs() * penetration;
-                // Move player out of collision (* 0.5 because there are two balls).
-                player.position_ball -= player.velocity_ball.normalize_to(penetration_vel);
+                let penetration_vel = 0.5 * sign * player.velocity_ball.dot(a_to_b) * penetration;
+                // Move player out of collision.
+                player.position_ball += 0.5 * sign * a_to_b * penetration;
                 // Update velocity
                 player.velocity_ball -= sign * vel;
-                // Get penetration along the new velocity vector.
-                let penetration_vel = 0.5 * player.velocity_ball.dot(a_to_b).abs() * penetration;
                 // Repeat remaining movement in the new direction.
                 player.position_ball += player.velocity_ball.normalize_to(penetration_vel);
             };
             bounce(self.players.get_mut(&id_a).unwrap(), -1.0);
             bounce(self.players.get_mut(&id_b).unwrap(), 1.0);
+        }
+
+        // Check for collisions with walls.
+        for (&id, player) in self.players.iter_mut() {
+            // Determine if player's ball intersects the boundary.
+            let distance_sq = player.position_ball.distance2(Point2::origin());
+            if distance_sq > (1.0 - BALL_RADIUS) * (1.0 - BALL_RADIUS) {
+                let distance = distance_sq.sqrt();
+                let normal = -player.position_ball.to_vec() / distance;
+                let penetration = distance - (1.0 - BALL_RADIUS) + 0.001;
+                debug!(
+                    "collision between {} and boundary circle ({})",
+                    id, penetration
+                );
+                // Get penetration along the velocity vector.
+                let penetration_vel = player.velocity_ball.dot(normal).abs() * penetration;
+                // Move player out of collision.
+                player.position_ball += normal * penetration;
+                // Update velocity, reflecting across the normal.
+                player.velocity_ball += 2.0 * normal * player.velocity_ball.dot(normal).abs();
+                // Repeat remaining movement in the new direction.
+                player.position_ball += player.velocity_ball.normalize_to(penetration_vel);
+            }
         }
     }
 

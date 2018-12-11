@@ -19,9 +19,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::{ElementState, MouseButton, Window, WindowEvent};
 
+const SCALE: f32 = 0.9;
 const BOUNDS_CIRCLE: Circle = Circle {
     center: Point2 { x: 0.0, y: 0.0 },
-    radius: 0.9,
+    radius: SCALE,
     color: LinSrgb {
         red: 1.0,
         green: 1.0,
@@ -96,7 +97,7 @@ impl GameState {
             } => match event {
                 WindowEvent::CursorMoved { position, .. } if !*locked => {
                     let size = window.get_inner_size().unwrap();
-                    let scale = 2.0 / size.width.min(size.height) as f32;
+                    let scale = (2.0 / size.width.min(size.height) as f32) / SCALE;
                     let position = Point2::new(
                         scale * (position.x as f32 - 0.5 * size.width as f32),
                         scale * (position.y as f32 - 0.5 * size.height as f32),
@@ -230,13 +231,13 @@ impl GameState {
                         .filter_map(|(id, player)| {
                             players.get(&id).map(|&PlayerClient { color, .. }| {
                                 let cursor = Circle {
-                                    center: player.position,
-                                    radius: CURSOR_RADIUS,
+                                    center: player.position * SCALE,
+                                    radius: CURSOR_RADIUS * SCALE,
                                     color,
                                 };
                                 let ball = Circle {
-                                    center: player.position_ball,
-                                    radius: BALL_RADIUS,
+                                    center: player.position_ball * SCALE,
+                                    radius: BALL_RADIUS * SCALE,
                                     color,
                                 };
                                 ArrayVec::from([cursor, ball])
