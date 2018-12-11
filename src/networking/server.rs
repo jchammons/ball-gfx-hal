@@ -4,7 +4,7 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use log::{debug, error, info, trace};
+use log::{error, info, trace};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self, Receiver, Sender};
@@ -327,7 +327,7 @@ impl Server {
         let (_, interval) = self.send_tick.next(now);
         self.timer.set_timeout(interval, TimeoutState::SendTick);
 
-        debug!("sending snapshot to clients");
+        trace!("sending snapshot to clients");
         let packet = ServerPacket::Snapshot(self.game.snapshot());
         self.broadcast(&packet)?;
 
@@ -340,7 +340,7 @@ impl Server {
         let mut dt = dt.as_float_secs() as f32;
         self.timer.set_timeout(interval, TimeoutState::GameTick);
 
-        debug!("stepping game tick (dt={})", dt);
+        trace!("stepping game tick (dt={})", dt);
         // Make sure that the simulation is never stepped faster than
         // 60hz, even if dt>1/60 sec.
         while dt > 1.0 / 60.0 {

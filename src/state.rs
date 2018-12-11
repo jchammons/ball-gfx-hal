@@ -1,4 +1,4 @@
-use crate::game::{GameClient, PlayerClient};
+use crate::game::{GameClient, PlayerClient, BALL_RADIUS, CURSOR_RADIUS};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
@@ -17,7 +17,7 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use winit::{Window, WindowEvent};
+use winit::{ElementState, MouseButton, Window, WindowEvent};
 
 const BOUNDS_CIRCLE: Circle = Circle {
     center: Point2 { x: 0.0, y: 0.0 },
@@ -46,6 +46,7 @@ pub enum GameState {
         server: Option<ServerHandle>,
         client: ClientHandle,
         game: Arc<GameClient>,
+        locked: bool,
     },
 }
 
@@ -88,8 +89,12 @@ impl GameState {
     pub fn handle_event(&mut self, window: &Window, event: &WindowEvent) {
         match self {
             GameState::MainMenu { .. } => (),
-            GameState::InGame { game, .. } => match event {
-                WindowEvent::CursorMoved { position, .. } => {
+            GameState::InGame {
+                ref game,
+                ref mut locked,
+                ..
+            } => match event {
+                WindowEvent::CursorMoved { position, .. } if !*locked => {
                     let size = window.get_inner_size().unwrap();
                     let scale = 2.0 / size.width.min(size.height) as f32;
                     let position = Point2::new(
@@ -97,6 +102,16 @@ impl GameState {
                         scale * (position.y as f32 - 0.5 * size.height as f32),
                     );
                     game.update_position(position);
+                }
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    *locked = *state == ElementState::Pressed;
+                }
+                WindowEvent::Focused(true) => {
+                    *locked = false;
                 }
                 _ => (),
             },
@@ -120,6 +135,7 @@ impl GameState {
                             server: connecting.server,
                             client: connecting.client,
                             game,
+                            locked: false,
                         });
                     }
                     Some((Err(err), _)) => {
@@ -215,12 +231,12 @@ impl GameState {
                             players.get(&id).map(|&PlayerClient { color, .. }| {
                                 let cursor = Circle {
                                     center: player.position,
-                                    radius: 0.05,
+                                    radius: CURSOR_RADIUS,
                                     color,
                                 };
                                 let ball = Circle {
                                     center: player.position_ball,
-                                    radius: 0.15,
+                                    radius: BALL_RADIUS,
                                     color,
                                 };
                                 ArrayVec::from([cursor, ball])
