@@ -24,9 +24,9 @@ impl Interval {
         self.interval
     }
 
-    /// Reports a processed tick, and returns the delay before the
-    /// next tick should occur.
-    pub fn next(&mut self, tick: Instant) -> Duration {
+    /// Reports a processed tick, and returns the interval since the
+    /// last tick, and the delay before the next tick should occur.
+    pub fn next(&mut self, tick: Instant) -> (Duration, Duration) {
         let interval = if tick > self.next {
             let late = tick.duration_since(self.next);
             if late > self.interval {
@@ -52,8 +52,9 @@ impl Interval {
                 self.interval + early
             }
         };
+        let tick_length = tick - (self.next - self.interval);
         trace!("scheduling next tick in {} secs", interval.as_float_secs());
         self.next = tick + interval;
-        interval
+        (tick_length, interval)
     }
 }

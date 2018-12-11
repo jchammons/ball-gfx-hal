@@ -1,5 +1,5 @@
 use crate::double_buffer::DoubleBuffer;
-use crate::game::{GameClient, Input};
+use crate::game::GameClient;
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
@@ -11,7 +11,6 @@ use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self as mio_channel, Receiver as MioReceiver, Sender as MioSender};
 use mio_extras::timer::{self, Timeout, Timer};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
@@ -280,7 +279,7 @@ impl Client {
                 ..
             } => {
                 let now = Instant::now();
-                let interval = tick.next(now);
+                let (_, interval) = tick.next(now);
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
                 let packet = ClientPacket::Input {
@@ -313,12 +312,11 @@ impl Client {
                 let sequence = self.connection.recv_header(&mut cursor)?;
                 let handshake: ServerHandshake =
                     bincode::deserialize_from(&mut cursor).map_err(Error::deserialize)?;
-                let game = Arc::new(GameClient {
-                    players: Mutex::new(handshake.players),
-                    snapshots: Mutex::new(DoubleBuffer::new((handshake.snapshot, Instant::now()))),
-                    input: Input::default(),
-                    client_player: handshake.id,
-                });
+                let game = Arc::new(GameClient::new(
+                    handshake.players,
+                    handshake.snapshot,
+                    handshake.id,
+                ));
                 let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.
                 self.timer.cancel_timeout(timeout);
@@ -349,18 +347,15 @@ impl Client {
                     ServerPacket::Snapshot(snapshot) => {
                         debug!("got snapshot from server");
                         if sequence > *snapshot_seq_ids.get() {
-                            let mut snapshots = game.snapshots.lock();
                             // Things are normal, rotate the buffers
                             // as expected.
-                            snapshots.insert((snapshot, Instant::now()));
+                            game.insert_snapshot(snapshot, true);
                             snapshot_seq_ids.insert(sequence);
-                            snapshots.swap();
                             snapshot_seq_ids.swap();
                         } else if sequence > *snapshot_seq_ids.get_old() {
-                            let mut snapshots = game.snapshots.lock();
                             // This snapshot belongs in between the
                             // current ones, so just replace old.
-                            snapshots.insert((snapshot, Instant::now()));
+                            game.insert_snapshot(snapshot, false);
                             snapshot_seq_ids.insert(sequence);
                         }
                         // Otherwise it's really old and we don't
