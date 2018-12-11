@@ -4,7 +4,6 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use int_hash::IntHashMap;
 use log::{debug, error, info, trace};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
@@ -25,7 +24,8 @@ const SHUTDOWN: Token = Token(2);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TimeoutState {
-    Tick,
+    SendTick,
+    GameTick,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub enum ServerPacket {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerHandshake {
     pub id: PlayerId,
-    pub players: IntHashMap<PlayerId, PlayerClient>,
+    pub players: HashMap<PlayerId, PlayerClient>,
     pub snapshot: Snapshot,
 }
 
@@ -67,7 +67,8 @@ pub struct Server {
     send_queue: VecDeque<Packet>,
     clients: HashMap<SocketAddr, Client>,
     game: GameServer,
-    tick: Interval,
+    send_tick: Interval,
+    game_tick: Interval,
     poll: Poll,
     shutdown: Receiver<()>,
 }
@@ -187,10 +188,13 @@ impl EventHandler for Server {
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
-                        TimeoutState::Tick => {
+                        TimeoutState::SendTick => {
                             if let Err(err) = self.send_tick() {
                                 error!("error when sending tick: {}", err);
                             }
+                        }
+                        TimeoutState::GameTick => {
+                            self.game_tick();
                         }
                     }
                 }
@@ -229,8 +233,10 @@ impl Server {
 
         // Set timeout for the first tick. All subsequent ticks will
         // be generated from Server::send_tick.
-        let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
-        timer.set_timeout(tick.interval(), TimeoutState::Tick);
+        let send_tick = Interval::new(Duration::from_float_secs(1.0 / 30.0)); // 30hz
+        timer.set_timeout(send_tick.interval(), TimeoutState::SendTick);
+        let game_tick = Interval::new(Duration::from_float_secs(1.0 / 60.0)); // 60hz
+        timer.set_timeout(game_tick.interval(), TimeoutState::GameTick);
 
         Ok(Server {
             socket,
@@ -239,7 +245,8 @@ impl Server {
             send_queue: VecDeque::new(),
             clients: HashMap::new(),
             game: GameServer::default(),
-            tick,
+            send_tick,
+            game_tick,
             poll,
             shutdown,
         })
@@ -317,14 +324,30 @@ impl Server {
     fn send_tick(&mut self) -> Result<(), Error> {
         // Send a snapshot to all connected clients.
         let now = Instant::now();
-        let interval = self.tick.next(now);
-        self.timer.set_timeout(interval, TimeoutState::Tick);
+        let (_, interval) = self.send_tick.next(now);
+        self.timer.set_timeout(interval, TimeoutState::SendTick);
 
         debug!("sending snapshot to clients");
         let packet = ServerPacket::Snapshot(self.game.snapshot());
         self.broadcast(&packet)?;
 
         Ok(())
+    }
+
+    fn game_tick(&mut self) {
+        let now = Instant::now();
+        let (dt, interval) = self.game_tick.next(now);
+        let mut dt = dt.as_float_secs() as f32;
+        self.timer.set_timeout(interval, TimeoutState::GameTick);
+
+        debug!("stepping game tick (dt={})", dt);
+        // Make sure that the simulation is never stepped faster than
+        // 60hz, even if dt>1/60 sec.
+        while dt > 1.0 / 60.0 {
+            self.game.tick(1.0 / 60.0);
+            dt -= 1.0 / 60.0;
+        }
+        self.game.tick(dt);
     }
 
     fn new_client(&mut self, addr: SocketAddr) -> Result<(), Error> {

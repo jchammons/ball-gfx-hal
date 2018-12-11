@@ -5,6 +5,7 @@ use crate::networking::{
     client::{self, ClientHandle, ConnectingHandle},
     server::{self, ServerHandle},
 };
+use arrayvec::ArrayVec;
 use cgmath::Point2;
 use gfx_hal::Backend;
 use imgui::{im_str, ImString, Ui};
@@ -102,7 +103,7 @@ impl GameState {
         }
     }
 
-    pub fn update(&mut self, _dt: f32) {
+    pub fn update(&mut self, dt: f32) {
         let mut transition = None;
 
         match self {
@@ -128,7 +129,14 @@ impl GameState {
                     None => (),
                 }
             }
-            _ => (),
+            GameState::InGame { ref game, .. } => {
+                let mut dt = dt;
+                while dt > 1.0 / 60.0 {
+                    game.tick(1.0 / 60.0);
+                    dt -= 1.0 / 60.0;
+                }
+                game.tick(dt);
+            }
         };
 
         if let Some(transition) = transition {
@@ -200,15 +208,26 @@ impl GameState {
             GameState::InGame { game, .. } => {
                 let players = game.players.lock();
                 let snapshot = game.interpolate_snapshot(now);
-                let circles = iter::once(BOUNDS_CIRCLE).chain(snapshot.players().filter_map(
-                    |(id, player)| {
-                        players.get(&id).map(|&PlayerClient { color, .. }| Circle {
-                            center: player.position,
-                            radius: 0.1,
-                            color,
+                let circles = iter::once(BOUNDS_CIRCLE).chain(
+                    snapshot
+                        .players()
+                        .filter_map(|(id, player)| {
+                            players.get(&id).map(|&PlayerClient { color, .. }| {
+                                let cursor = Circle {
+                                    center: player.position,
+                                    radius: 0.05,
+                                    color,
+                                };
+                                let ball = Circle {
+                                    center: player.position_ball,
+                                    radius: 0.15,
+                                    color,
+                                };
+                                ArrayVec::from([cursor, ball])
+                            })
                         })
-                    },
-                ));
+                        .flatten(),
+                );
 
                 circle_rend.draw(ctx, circles);
             }
