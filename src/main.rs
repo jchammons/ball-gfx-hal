@@ -57,6 +57,9 @@ fn run_gui() {
     let mut imgui_winit = ImGuiWinit::new(&mut imgui);
     let mut events_loop = EventsLoop::new();
     let window = Window::new(&events_loop).unwrap();
+    let mut window_size = window.get_inner_size().unwrap();
+
+    let mut game_state = state::GameState::default();
 
     let instance = backend::Instance::create("Ball", 1);
     let surface = instance.create_surface(&window);
@@ -65,21 +68,25 @@ fn run_gui() {
 
     let mut renderdoc = graphics::renderdoc::init();
 
-    let mut game_state = state::GameState::default();
+    let mut last_frame = Instant::now();
 
     let mut running = true;
-    let mut last_frame = Instant::now();
     while running {
         // Wait for vertical blank/etc. before even starting to render.
         graphics.wait_for_frame();
 
         events_loop.poll_events(|event| {
             imgui_winit.handle_event(&mut imgui, &event);
-
             if let Event::WindowEvent { event, .. } = event {
-                game_state.handle_event(&window, &event);
-                if let WindowEvent::CloseRequested = event {
-                    running = false;
+                game_state.handle_event(&window_size, &event);
+                match event {
+                    WindowEvent::CloseRequested => {
+                        running = false;
+                    }
+                    WindowEvent::Resized(size) => {
+                        window_size = size;
+                    }
+                    _ => (),
                 }
             }
         });
@@ -141,6 +148,7 @@ fn run_gui() {
         });
     }
 
+    // Graphics cleanup.
     circle_rend.destroy(&mut graphics);
     graphics.destroy();
 }

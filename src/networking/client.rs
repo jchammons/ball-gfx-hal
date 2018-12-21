@@ -1,16 +1,16 @@
 use crate::double_buffer::DoubleBuffer;
-use crate::game::GameClient;
+use crate::game::{client::Game, Input};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use cgmath::Point2;
-use log::{error, info, trace, warn};
+use log::{error, info, trace};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self as mio_channel, Receiver as MioReceiver, Sender as MioSender};
 use mio_extras::timer::{self, Timeout, Timer};
+use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
@@ -34,22 +34,26 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
-    Input { position: Point2<f32> },
+    Input(Input),
     Disconnect,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ClientHandshake;
+pub struct ClientHandshake {
+    /// Cursor position when connecting.
+    pub cursor: Point2<f32>,
+}
 
 pub enum ClientState {
     Connecting {
-        done: StdSender<Result<Arc<GameClient>, Error>>,
+        done: StdSender<Result<Arc<Game>, Error>>,
         timeout: Timeout,
+        cursor: Point2<f32>,
     },
     Connected {
         tick: Interval,
         snapshot_seq_ids: DoubleBuffer<u32>,
-        game: Arc<GameClient>,
+        game: Arc<Game>,
     },
 }
 
@@ -73,13 +77,16 @@ pub struct ClientHandle {
 }
 
 pub struct ConnectingHandle {
-    done: StdReceiver<Result<Arc<GameClient>, Error>>,
+    done: StdReceiver<Result<Arc<Game>, Error>>,
 }
 
-pub fn connect(addr: SocketAddr) -> Result<(ClientHandle, ConnectingHandle), Error> {
+pub fn connect(
+    addr: SocketAddr,
+    cursor: Point2<f32>,
+) -> Result<(ClientHandle, ConnectingHandle), Error> {
     let (done_tx, done_rx) = std_channel::channel();
     let (shutdown_tx, shutdown_rx) = mio_channel::channel();
-    let mut client = Client::new(addr, done_tx, shutdown_rx)?;
+    let mut client = Client::new(addr, done_tx, shutdown_rx, cursor)?;
     thread::spawn(move || {
         run_event_loop(&mut client);
     });
@@ -100,7 +107,7 @@ impl ClientHandle {
 
 impl ConnectingHandle {
     /// Gets the connection result, if connection finished.
-    pub fn done(&mut self) -> Option<Result<Arc<GameClient>, Error>> {
+    pub fn done(&mut self) -> Option<Result<Arc<Game>, Error>> {
         match self.done.try_recv() {
             Ok(done) => Some(done),
             Err(TryRecvError::Empty) => None,
@@ -179,8 +186,9 @@ impl EventHandler for Client {
 impl Client {
     pub fn new(
         addr: SocketAddr,
-        done: StdSender<Result<Arc<GameClient>, Error>>,
+        done: StdSender<Result<Arc<Game>, Error>>,
         shutdown: MioReceiver<()>,
+        cursor: Point2<f32>,
     ) -> Result<Client, Error> {
         let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap()).map_err(Error::bind_socket)?;
         socket.connect(addr).map_err(Error::connect_socket)?;
@@ -204,13 +212,17 @@ impl Client {
             send_queue: VecDeque::new(),
             poll,
             connection: Connection::default(),
-            state: ClientState::Connecting { done, timeout },
+            state: ClientState::Connecting {
+                done,
+                timeout,
+                cursor,
+            },
             shutdown,
             needs_shutdown: false,
         };
 
         // Send handshake
-        client.send(&ClientHandshake)?;
+        client.send(&ClientHandshake { cursor })?;
 
         Ok(client)
     }
@@ -282,9 +294,12 @@ impl Client {
                 let (_, interval) = tick.next(now);
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
-                let packet = ClientPacket::Input {
-                    position: game.input.position(),
-                };
+                let mut input_buffer = game.input_buffer.lock();
+                let sequence = self.connection.local_sequence;
+                input_buffer.packet_send(sequence);
+                let packet = ClientPacket::Input(*input_buffer.latest());
+                drop(input_buffer);
+
                 trace!("sending tick packet to server: {:?}", packet);
                 self.send(&packet)?;
             }
@@ -306,16 +321,17 @@ impl Client {
             ClientState::Connecting {
                 ref mut done,
                 ref timeout,
+                ref cursor,
             } => {
                 // Assumed to be a handshake packet.
-                let mut cursor = Cursor::new(packet);
-                let sequence = self.connection.recv_header(&mut cursor)?;
-                let handshake: ServerHandshake =
-                    bincode::deserialize_from(&mut cursor).map_err(Error::deserialize)?;
-                let game = Arc::new(GameClient::new(
+                let (handshake, sequence, _) = self
+                    .connection
+                    .decode::<_, ServerHandshake>(Cursor::new(packet))?;
+                let game = Arc::new(Game::new(
                     handshake.players,
                     handshake.snapshot,
                     handshake.id,
+                    *cursor,
                 ));
                 let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
                 // Start the timer for sending input ticks.
@@ -339,39 +355,36 @@ impl Client {
                 ref mut snapshot_seq_ids,
                 ..
             } => {
-                let mut read = Cursor::new(packet);
-                let sequence = self.connection.recv_header(&mut read)?;
-                let packet = bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
-
+                let (packet, sequence, acks) = self.connection.decode(Cursor::new(packet))?;
+                game.input_buffer.lock().packet_acks(acks);
                 match packet {
-                    ServerPacket::Snapshot(snapshot) => {
+                    ServerPacket::Snapshot {
+                        snapshot,
+                        input_delay,
+                    } => {
                         trace!("got snapshot from server");
                         if sequence > *snapshot_seq_ids.get() {
                             // Things are normal, rotate the buffers
                             // as expected.
-                            game.insert_snapshot(snapshot, true);
+                            game.insert_snapshot(snapshot, input_delay, true);
                             snapshot_seq_ids.insert(sequence);
                             snapshot_seq_ids.swap();
                         } else if sequence > *snapshot_seq_ids.get_old() {
                             // This snapshot belongs in between the
                             // current ones, so just replace old.
-                            game.insert_snapshot(snapshot, false);
+                            game.insert_snapshot(snapshot, input_delay, false);
                             snapshot_seq_ids.insert(sequence);
                         }
                         // Otherwise it's really old and we don't
                         // care.
                     }
-                    ServerPacket::PlayerJoined { id, player } => {
+                    ServerPacket::PlayerJoined { id, static_state } => {
                         info!("new player joined: {}", id);
-                        let mut players = game.players.lock();
-                        players.insert(id, player);
+                        game.add_player(id, static_state);
                     }
                     ServerPacket::PlayerLeft(id) => {
                         info!("player {} left", id);
-                        let mut players = game.players.lock();
-                        if players.remove(&id).is_none() {
-                            warn!("server says player {} left, but client didn't register that player at all", id);
-                        }
+                        game.remove_player(id);
                     }
                 }
 

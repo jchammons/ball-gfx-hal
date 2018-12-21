@@ -1,5 +1,4 @@
 use crate::graphics::{select_memory_type, DrawContext, Graphics, GLOBAL_UBO_SIZE};
-use cgmath::Point2;
 use gfx_hal::{
     buffer::{Access, Usage},
     command::BufferCopy,
@@ -14,6 +13,7 @@ use gfx_hal::{
     },
     Backend, DescriptorPool, Device, Primitive, Submission,
 };
+use nalgebra::Point2;
 use palette::LinSrgb;
 use std::mem;
 
