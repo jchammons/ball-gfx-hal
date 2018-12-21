@@ -133,11 +133,11 @@ impl Log for Logger {
 
             // Output to stdout, re-using the format results.
             let level = match record.level() {
-                Level::Error => "[ERROR]".red(),
-                Level::Warn => "[WARN ]".yellow(),
-                Level::Info => "[INFO ]".cyan(),
-                Level::Debug => "[DEBUG]".blue(),
-                Level::Trace => "[TRACE]".blue(),
+                Level::Error => "[ERR]".red(),
+                Level::Warn => "[WRN]".yellow(),
+                Level::Info => "[INF]".green(),
+                Level::Debug => "[DBG]".blue(),
+                Level::Trace => "[TRC]".normal(),
             };
             let msg = unsafe {
                 // Garaunteed to be UTF8 as long as the null
@@ -194,11 +194,11 @@ impl Logger {
                 for record in internal.records.iter() {
                     if record.level <= filter {
                         let (color, level) = match record.level {
-                            Level::Error => ((0.75, 0.25, 0.25, 1.0), im_str!("[ERROR]")),
-                            Level::Warn => ((0.75, 0.75, 0.25, 1.0), im_str!("[WARN ]")),
-                            Level::Info => ((0.25, 0.25, 0.75, 1.0), im_str!("[INFO ]")),
-                            Level::Debug => ((0.5, 0.5, 0.5, 1.0), im_str!("[DEBUG]")),
-                            Level::Trace => ((0.25, 0.25, 0.25, 1.0), im_str!("[TRACE]")),
+                            Level::Error => ((0.75, 0.25, 0.25, 1.0), im_str!("[ERR]")),
+                            Level::Warn => ((0.75, 0.75, 0.25, 1.0), im_str!("[WRN]")),
+                            Level::Info => ((0.25, 0.75, 0.25, 1.0), im_str!("[INF]")),
+                            Level::Debug => ((0.5, 0.5, 0.75, 1.0), im_str!("[DBG]")),
+                            Level::Trace => ((0.25, 0.25, 0.25, 1.0), im_str!("[TRC]")),
                         };
                         ui.text_colored(color, level);
                         ui.same_line(0.0);
