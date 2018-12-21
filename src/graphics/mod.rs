@@ -6,14 +6,36 @@ use gfx_hal::{
     image::{self, Layout, SubresourceRange, ViewKind},
     memory::{Barrier, Dependencies, Properties, Requirements},
     pass::{
-        Attachment, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, SubpassDependency,
-        SubpassDesc, SubpassRef,
+        Attachment,
+        AttachmentLoadOp,
+        AttachmentOps,
+        AttachmentStoreOp,
+        SubpassDependency,
+        SubpassDesc,
+        SubpassRef,
     },
     pool::CommandPoolCreateFlags,
     pso::{DescriptorRangeDesc, DescriptorType, PipelineStage, Rect, Viewport},
-    Adapter, Backbuffer, Backend, CommandPool, CommandQueue, Device, FrameSync, Instance,
-    MemoryType, MemoryTypeId, PhysicalDevice, PresentMode, QueueFamily, QueueGroup, QueueType,
-    Submission, Surface, SwapImageIndex, Swapchain, SwapchainConfig,
+    Adapter,
+    Backbuffer,
+    Backend,
+    CommandPool,
+    CommandQueue,
+    Device,
+    FrameSync,
+    Instance,
+    MemoryType,
+    MemoryTypeId,
+    PhysicalDevice,
+    PresentMode,
+    QueueFamily,
+    QueueGroup,
+    QueueType,
+    Submission,
+    Surface,
+    SwapImageIndex,
+    Swapchain,
+    SwapchainConfig,
 };
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
@@ -64,7 +86,8 @@ pub struct Graphics<B: Backend> {
     memory_types: Vec<MemoryType>,
     queue_groups: QueueGroups<B>,
     transfer_command_pool: CommandPool<B, gfx_hal::Transfer>,
-    frame_command_pools: ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
+    frame_command_pools:
+        ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
     swapchain_state: SwapchainState<B>,
     render_pass: B::RenderPass,
     global_ubo: B::Buffer,
@@ -105,7 +128,7 @@ pub mod renderdoc {
             Err(err) => {
                 error!("Renderdoc failed to init: {}", err);
                 None
-            }
+            },
         }
     }
 
@@ -139,13 +162,14 @@ pub fn select_memory_type<I: IntoIterator<Item = Requirements>>(
     requirements: I,
     properties: Properties,
 ) -> Option<MemoryTypeId> {
-    let type_mask = requirements
-        .into_iter()
-        .fold(!0, |mask, req| req.type_mask & mask);
+    let type_mask =
+        requirements.into_iter().fold(!0, |mask, req| req.type_mask & mask);
     memory_types
         .iter()
         .enumerate()
-        .find(|(id, mem)| type_mask & (1u64 << id) != 0 && mem.properties.contains(properties))
+        .find(|(id, mem)| {
+            type_mask & (1u64 << id) != 0 && mem.properties.contains(properties)
+        })
         .map(|(id, _)| MemoryTypeId(id))
 }
 
@@ -153,10 +177,15 @@ impl<B: Backend> QueueGroups<B> {
     /// Gets the main graphics command queue.
     ///
     /// This is always the first queue for the graphics queue group.
-    pub fn graphics_queue(&mut self) -> &mut CommandQueue<B, gfx_hal::Graphics> {
+    pub fn graphics_queue(
+        &mut self,
+    ) -> &mut CommandQueue<B, gfx_hal::Graphics> {
         match self {
             QueueGroups::Single(graphics) => &mut graphics.queues[0],
-            QueueGroups::Separate { graphics, .. } => &mut graphics.queues[0],
+            QueueGroups::Separate {
+                graphics,
+                ..
+            } => &mut graphics.queues[0],
         }
     }
 
@@ -165,7 +194,9 @@ impl<B: Backend> QueueGroups<B> {
     /// If there is not a separate transfer queue, this is the second
     /// graphics queue. If there is only one graphics queue, it just
     /// returns the same queue as a call to `graphics_queue`
-    pub fn transfer_queue(&mut self) -> &mut CommandQueue<B, gfx_hal::Transfer> {
+    pub fn transfer_queue(
+        &mut self,
+    ) -> &mut CommandQueue<B, gfx_hal::Transfer> {
         match self {
             QueueGroups::Single(graphics) => {
                 if graphics.queues.len() > 1 {
@@ -173,8 +204,11 @@ impl<B: Backend> QueueGroups<B> {
                 } else {
                     graphics.queues[0].downgrade()
                 }
-            }
-            QueueGroups::Separate { transfer, .. } => &mut transfer.queues[0],
+            },
+            QueueGroups::Separate {
+                transfer,
+                ..
+            } => &mut transfer.queues[0],
         }
     }
 
@@ -187,7 +221,10 @@ impl<B: Backend> QueueGroups<B> {
     ) -> CommandPool<B, gfx_hal::Graphics> {
         let queue_group = match self {
             QueueGroups::Single(graphics) => graphics,
-            QueueGroups::Separate { graphics, .. } => graphics,
+            QueueGroups::Separate {
+                graphics,
+                ..
+            } => graphics,
         };
         device
             .create_command_pool_typed(queue_group, flags, max_buffers)
@@ -210,9 +247,14 @@ impl<B: Backend> QueueGroups<B> {
                         .unwrap(),
                 )
             },
-            QueueGroups::Separate { transfer, .. } => device
-                .create_command_pool_typed(transfer, flags, max_buffers)
-                .unwrap(),
+            QueueGroups::Separate {
+                transfer,
+                ..
+            } => {
+                device
+                    .create_command_pool_typed(transfer, flags, max_buffers)
+                    .unwrap()
+            },
         }
     }
 }
@@ -235,10 +277,10 @@ impl<B: Backend> Graphics<B> {
                 .queue_families
                 .iter()
                 .find(|family| family.queue_type() == QueueType::Transfer);
-            let graphics = adapter
-                .queue_families
-                .iter()
-                .find(|family| family.supports_graphics() && surface.supports_queue_family(family));
+            let graphics = adapter.queue_families.iter().find(|family| {
+                family.supports_graphics() &&
+                    surface.supports_queue_family(family)
+            });
             match (transfer, graphics) {
                 (_, None) => continue, // No graphics queue.
                 (None, Some(graphics)) => {
@@ -247,23 +289,39 @@ impl<B: Backend> Graphics<B> {
                         .physical_device
                         .open(&[(&graphics, &[1.0])])
                         .unwrap();
-                    let queue_group = gpu.queues.take::<gfx_hal::Graphics>(graphics.id()).unwrap();
-                    break (adapter, gpu.device, QueueGroups::Single(queue_group));
-                }
+                    let queue_group = gpu
+                        .queues
+                        .take::<gfx_hal::Graphics>(graphics.id())
+                        .unwrap();
+                    break (
+                        adapter,
+                        gpu.device,
+                        QueueGroups::Single(queue_group),
+                    );
+                },
                 (Some(transfer), Some(graphics)) => {
                     // Separate transfer and graphics queues.
                     let mut gpu = adapter
                         .physical_device
                         .open(&[(&graphics, &[1.0]), (&transfer, &[0.0])])
                         .unwrap();
-                    let graphics = gpu.queues.take::<gfx_hal::Graphics>(graphics.id()).unwrap();
-                    let transfer = gpu.queues.take::<gfx_hal::Transfer>(transfer.id()).unwrap();
+                    let graphics = gpu
+                        .queues
+                        .take::<gfx_hal::Graphics>(graphics.id())
+                        .unwrap();
+                    let transfer = gpu
+                        .queues
+                        .take::<gfx_hal::Transfer>(transfer.id())
+                        .unwrap();
                     break (
                         adapter,
                         gpu.device,
-                        QueueGroups::Separate { graphics, transfer },
+                        QueueGroups::Separate {
+                            graphics,
+                            transfer,
+                        },
                     );
-                }
+                },
             }
         };
         let physical_device = &adapter.physical_device;
@@ -271,11 +329,12 @@ impl<B: Backend> Graphics<B> {
 
         let transfer_fence = device.create_fence(false).unwrap();
 
-        let mut transfer_command_pool = queue_groups.create_transfer_command_pool(
-            &device,
-            CommandPoolCreateFlags::TRANSIENT,
-            16,
-        );
+        let mut transfer_command_pool = queue_groups
+            .create_transfer_command_pool(
+                &device,
+                CommandPoolCreateFlags::TRANSIENT,
+                16,
+            );
 
         // Create global UBO
         let global_ubo = device
@@ -285,12 +344,14 @@ impl<B: Backend> Graphics<B> {
             )
             .unwrap();
         let requirements = device.get_buffer_requirements(&global_ubo);
-        let memory_type =
-            select_memory_type(&memory_types, Some(requirements), Properties::DEVICE_LOCAL)
-                .expect("can't find memory type for global uniform buffer");
-        let global_ubo_memory = device
-            .allocate_memory(memory_type, requirements.size)
-            .unwrap();
+        let memory_type = select_memory_type(
+            &memory_types,
+            Some(requirements),
+            Properties::DEVICE_LOCAL,
+        )
+        .expect("can't find memory type for global uniform buffer");
+        let global_ubo_memory =
+            device.allocate_memory(memory_type, requirements.size).unwrap();
         let global_ubo = device
             .bind_buffer_memory(&global_ubo_memory, 0, global_ubo)
             .unwrap();
@@ -309,7 +370,10 @@ impl<B: Backend> Graphics<B> {
             let color_attachment = Attachment {
                 format: Some(color_format),
                 samples: 1,
-                ops: AttachmentOps::new(AttachmentLoadOp::Clear, AttachmentStoreOp::Store),
+                ops: AttachmentOps::new(
+                    AttachmentLoadOp::Clear,
+                    AttachmentStoreOp::Store,
+                ),
                 stencil_ops: AttachmentOps::DONT_CARE,
                 layouts: Layout::Undefined..Layout::Present,
             };
@@ -324,15 +388,19 @@ impl<B: Backend> Graphics<B> {
 
             let dependency = SubpassDependency {
                 passes: SubpassRef::External..SubpassRef::Pass(0),
-                stages: PipelineStage::COLOR_ATTACHMENT_OUTPUT
-                    ..PipelineStage::COLOR_ATTACHMENT_OUTPUT,
-                accesses: image::Access::empty()
-                    ..(image::Access::COLOR_ATTACHMENT_READ
-                        | image::Access::COLOR_ATTACHMENT_WRITE),
+                stages: PipelineStage::COLOR_ATTACHMENT_OUTPUT..
+                    PipelineStage::COLOR_ATTACHMENT_OUTPUT,
+                accesses: image::Access::empty()..
+                    (image::Access::COLOR_ATTACHMENT_READ |
+                        image::Access::COLOR_ATTACHMENT_WRITE),
             };
 
             device
-                .create_render_pass(&[color_attachment], &[subpass], &[dependency])
+                .create_render_pass(
+                    &[color_attachment],
+                    &[subpass],
+                    &[dependency],
+                )
                 .unwrap()
         };
 
@@ -433,11 +501,17 @@ impl<B: Backend> Graphics<B> {
         self.device.wait_for_fence(frame_fence, !0).unwrap();
     }
 
-    pub fn draw_frame<F: FnOnce(DrawContext<B>)>(&mut self, ui: Ui, draw_fn: F) -> Result<(), ()> {
+    pub fn draw_frame<F: FnOnce(DrawContext<B>)>(
+        &mut self,
+        ui: Ui,
+        draw_fn: F,
+    ) -> Result<(), ()> {
         // Frame specific resources...
         let frame_fence = &self.frame_fences[self.current_frame];
-        let image_available_semaphore = &self.image_available_semaphores[self.current_frame];
-        let frame_finished_semaphore = &self.frame_finished_semaphores[self.current_frame];
+        let image_available_semaphore =
+            &self.image_available_semaphores[self.current_frame];
+        let frame_finished_semaphore =
+            &self.frame_finished_semaphores[self.current_frame];
 
         // Make sure there are no more than MAX_FRAMES frames in flight.
         // TODO: somehow check that `wait_for_frame` has already been run.
@@ -482,9 +556,10 @@ impl<B: Backend> Graphics<B> {
         let ubo_update = self.first_frame || self.viewport_update;
         if ubo_update {
             // Update the global UBO.
-            //self.transfer_command_pool.reset();
+            // self.transfer_command_pool.reset();
             let submit = {
-                let mut cbuf = self.transfer_command_pool.acquire_command_buffer(false);
+                let mut cbuf =
+                    self.transfer_command_pool.acquire_command_buffer(false);
 
                 let (width, height) = (
                     f32::from(self.swapchain_state.viewport.rect.w),
@@ -495,12 +570,15 @@ impl<B: Backend> Graphics<B> {
                 } else {
                     [1.0, width / height]
                 };
-                let data = GlobalUbo { scale };
+                let data = GlobalUbo {
+                    scale,
+                };
                 let data: [u8; 4 * 2] = unsafe { mem::transmute(data) };
 
                 cbuf.update_buffer(&self.global_ubo, 0, &data);
                 let barrier = Barrier::Buffer {
-                    states: buffer::Access::TRANSFER_WRITE..buffer::Access::empty(),
+                    states: buffer::Access::TRANSFER_WRITE..
+                        buffer::Access::empty(),
                     target: &self.global_ubo,
                 };
                 cbuf.pipeline_barrier(
@@ -525,16 +603,18 @@ impl<B: Backend> Graphics<B> {
             .unwrap();
 
         let submit = {
-            let mut cbuf =
-                self.frame_command_pools[self.current_frame].acquire_command_buffer(false);
+            let mut cbuf = self.frame_command_pools[self.current_frame]
+                .acquire_command_buffer(false);
             {
                 if ubo_update {
                     let barrier = Barrier::Buffer {
-                        states: buffer::Access::empty()..buffer::Access::SHADER_READ,
+                        states: buffer::Access::empty()..
+                            buffer::Access::SHADER_READ,
                         target: &self.global_ubo,
                     };
                     cbuf.pipeline_barrier(
-                        PipelineStage::TOP_OF_PIPE..PipelineStage::VERTEX_SHADER,
+                        PipelineStage::TOP_OF_PIPE..
+                            PipelineStage::VERTEX_SHADER,
                         Dependencies::empty(),
                         &[barrier],
                     );
@@ -545,7 +625,9 @@ impl<B: Backend> Graphics<B> {
                     &self.render_pass,
                     &self.swapchain_state.framebuffers[frame_index as usize],
                     self.swapchain_state.viewport.rect,
-                    &[ClearValue::Color(ClearColor::Float([0.0, 0.0, 0.0, 1.0]))],
+                    &[ClearValue::Color(ClearColor::Float([
+                        0.0, 0.0, 0.0, 1.0,
+                    ]))],
                 );
 
                 {
@@ -667,7 +749,7 @@ impl<B: Backend> SwapchainState<B> {
         present_mode: PresentMode,
         old: Option<SwapchainState<B>>,
     ) -> SwapchainState<B> {
-        let (caps, _, _) = surface.compatibility(physical_device);
+        let (caps, ..) = surface.compatibility(physical_device);
         let extent = caps.current_extent.unwrap();
         assert!(caps.image_count.contains(&(MAX_FRAMES as u32)));
         let swapchain_config = SwapchainConfig {
@@ -691,9 +773,8 @@ impl<B: Backend> SwapchainState<B> {
             old.swapchain
         });
 
-        let (swapchain, backbuffer) = device
-            .create_swapchain(surface, swapchain_config, old)
-            .unwrap();
+        let (swapchain, backbuffer) =
+            device.create_swapchain(surface, swapchain_config, old).unwrap();
 
         let (frame_views, framebuffers) = match backbuffer {
             Backbuffer::Images(images) => {
@@ -722,13 +803,17 @@ impl<B: Backend> SwapchainState<B> {
                     .iter()
                     .map(|image_view| {
                         device
-                            .create_framebuffer(&render_pass, vec![image_view], extent.to_extent())
+                            .create_framebuffer(
+                                &render_pass,
+                                vec![image_view],
+                                extent.to_extent(),
+                            )
                             .unwrap()
                     })
                     .collect();
 
                 (image_views, fbos)
-            }
+            },
             Backbuffer::Framebuffer(fbo) => (vec![], vec![fbo]),
         };
 

@@ -16,7 +16,13 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use winit::{dpi::LogicalPosition, dpi::LogicalSize, ElementState, MouseButton, WindowEvent};
+use winit::{
+    dpi::LogicalPosition,
+    dpi::LogicalSize,
+    ElementState,
+    MouseButton,
+    WindowEvent,
+};
 
 const SCALE: f32 = 0.9;
 /// This is a function since `Point2::new` isn't `const fn`.
@@ -57,7 +63,10 @@ pub enum GameState {
 }
 
 impl ConnectingState {
-    fn host(addr: SocketAddr, cursor: Point2<f32>) -> Result<ConnectingState, networking::Error> {
+    fn host(
+        addr: SocketAddr,
+        cursor: Point2<f32>,
+    ) -> Result<ConnectingState, networking::Error> {
         let (server, _) = server::host(addr)?;
         let (client, connecting) = client::connect(addr, cursor)?;
         Ok(ConnectingState {
@@ -106,31 +115,44 @@ impl GameState {
         };
 
         match self {
-            GameState::MainMenu { ref mut cursor, .. } => match event {
-                WindowEvent::CursorMoved { position, .. } => {
-                    *cursor = cursor_pos(position);
+            GameState::MainMenu {
+                ref mut cursor,
+                ..
+            } => {
+                match event {
+                    WindowEvent::CursorMoved {
+                        position,
+                        ..
+                    } => {
+                        *cursor = cursor_pos(position);
+                    },
+                    _ => (),
                 }
-                _ => (),
             },
             GameState::InGame {
                 ref game,
                 ref mut locked,
                 ..
-            } => match event {
-                WindowEvent::CursorMoved { position, .. } if !*locked => {
-                    game.update_cursor(cursor_pos(position));
+            } => {
+                match event {
+                    WindowEvent::CursorMoved {
+                        position,
+                        ..
+                    } if !*locked => {
+                        game.update_cursor(cursor_pos(position));
+                    },
+                    WindowEvent::MouseInput {
+                        state,
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        *locked = *state == ElementState::Pressed;
+                    },
+                    WindowEvent::Focused(true) => {
+                        *locked = false;
+                    },
+                    _ => (),
                 }
-                WindowEvent::MouseInput {
-                    state,
-                    button: MouseButton::Left,
-                    ..
-                } => {
-                    *locked = *state == ElementState::Pressed;
-                }
-                WindowEvent::Focused(true) => {
-                    *locked = false;
-                }
-                _ => (),
             },
         }
     }
@@ -140,7 +162,8 @@ impl GameState {
 
         match self {
             GameState::MainMenu {
-                ref mut connecting, ..
+                ref mut connecting,
+                ..
             } => {
                 let done = connecting
                     .as_mut()
@@ -154,17 +177,20 @@ impl GameState {
                             game,
                             locked: false,
                         });
-                    }
+                    },
                     Some((Err(err), _)) => {
                         error!("failed to connect: {}", err);
                         *connecting = None;
-                    }
+                    },
                     None => (),
                 }
-            }
-            GameState::InGame { ref game, .. } => {
+            },
+            GameState::InGame {
+                ref game,
+                ..
+            } => {
                 game.tick(dt);
-            }
+            },
         };
 
         if let Some(transition) = transition {
@@ -180,9 +206,8 @@ impl GameState {
                 ref mut connecting,
                 ref cursor,
             } => {
-                ui.window(im_str!("Main Menu"))
-                    .always_auto_resize(true)
-                    .build(|| {
+                ui.window(im_str!("Main Menu")).always_auto_resize(true).build(
+                    || {
                         if connecting.is_some() {
                             ui.text(im_str!("Connecting..."));
                             ui.separator();
@@ -192,35 +217,64 @@ impl GameState {
                             .build();
                         if ui.small_button(im_str!("Connect to server")) {
                             match server_addr.to_str().parse() {
-                                Ok(addr) => match ConnectingState::connect(addr, *cursor) {
-                                    Ok(state) => *connecting = Some(state),
-                                    Err(err) => error!("error hosting server: {}", err),
+                                Ok(addr) => {
+                                    match ConnectingState::connect(
+                                        addr, *cursor,
+                                    ) {
+                                        Ok(state) => *connecting = Some(state),
+                                        Err(err) => {
+                                            error!(
+                                                "error hosting server: {}",
+                                                err
+                                            )
+                                        },
+                                    }
                                 },
                                 Err(_) => {
-                                    warn!("Couldn't parse server address: {}", server_addr.to_str())
-                                }
+                                    warn!(
+                                        "Couldn't parse server address: {}",
+                                        server_addr.to_str()
+                                    )
+                                },
                             }
                         }
 
                         ui.separator();
 
-                        ui.input_text(im_str!("Host address"), server_addr_host)
-                            .build();
+                        ui.input_text(
+                            im_str!("Host address"),
+                            server_addr_host,
+                        )
+                        .build();
                         if ui.small_button(im_str!("Host server")) {
                             match server_addr_host.to_str().parse() {
-                                Ok(addr) => match ConnectingState::host(addr, *cursor) {
-                                    Ok(state) => *connecting = Some(state),
-                                    Err(err) => error!("error connecting to server: {}", err),
+                                Ok(addr) => {
+                                    match ConnectingState::host(addr, *cursor) {
+                                        Ok(state) => *connecting = Some(state),
+                                        Err(err) => {
+                                            error!(
+                                                "error connecting to server: \
+                                                 {}",
+                                                err
+                                            )
+                                        },
+                                    }
                                 },
-                                Err(_) => warn!(
-                                    "Couldn't parse server hosting address: {}",
-                                    server_addr_host.to_str()
-                                ),
+                                Err(_) => {
+                                    warn!(
+                                        "Couldn't parse server hosting \
+                                         address: {}",
+                                        server_addr_host.to_str()
+                                    )
+                                },
                             }
                         }
-                    });
-            }
-            GameState::InGame { .. } => (),
+                    },
+                );
+            },
+            GameState::InGame {
+                ..
+            } => (),
         }
     }
 
@@ -231,10 +285,15 @@ impl GameState {
         ctx: &mut DrawContext<B>,
     ) {
         match self {
-            GameState::MainMenu { .. } => {
+            GameState::MainMenu {
+                ..
+            } => {
                 circle_rend.draw(ctx, iter::once(bounds_circle()));
-            }
-            GameState::InGame { game, .. } => {
+            },
+            GameState::InGame {
+                game,
+                ..
+            } => {
                 game.players(now, |players| {
                     let circles = iter::once(bounds_circle()).chain(
                         players
@@ -243,7 +302,7 @@ impl GameState {
                     );
                     circle_rend.draw(ctx, circles)
                 });
-            }
+            },
         }
     }
 }

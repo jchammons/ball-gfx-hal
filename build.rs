@@ -21,10 +21,7 @@ fn main() {
 
             println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
             let mut source = String::new();
-            File::open(path)
-                .unwrap()
-                .read_to_string(&mut source)
-                .unwrap();
+            File::open(path).unwrap().read_to_string(&mut source).unwrap();
             let artifact = match compiler.compile_into_spirv(
                 &source,
                 kind,
@@ -35,7 +32,7 @@ fn main() {
                 Ok(artifact) => artifact,
                 Err(Error::CompilationError(_, err)) => {
                     panic!("Shader compilation failed:\n{}", err)
-                }
+                },
                 Err(err) => panic!("Shader compilation failed: {:?}", err),
             };
             if artifact.get_num_warnings() > 0 {

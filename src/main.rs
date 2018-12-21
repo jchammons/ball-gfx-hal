@@ -42,7 +42,7 @@ fn main() {
             })
             .unwrap();
             thread.join().unwrap();
-        }
+        },
         None => run_gui(),
     }
 }
@@ -63,7 +63,8 @@ fn run_gui() {
 
     let instance = backend::Instance::create("Ball", 1);
     let surface = instance.create_surface(&window);
-    let mut graphics = graphics::Graphics::new(&instance, surface, &mut imgui, present_mode);
+    let mut graphics =
+        graphics::Graphics::new(&instance, surface, &mut imgui, present_mode);
     let mut circle_rend = graphics::CircleRenderer::new(&mut graphics);
 
     let mut renderdoc = graphics::renderdoc::init();
@@ -77,15 +78,19 @@ fn run_gui() {
 
         events_loop.poll_events(|event| {
             imgui_winit.handle_event(&mut imgui, &event);
-            if let Event::WindowEvent { event, .. } = event {
+            if let Event::WindowEvent {
+                event,
+                ..
+            } = event
+            {
                 game_state.handle_event(&window_size, &event);
                 match event {
                     WindowEvent::CloseRequested => {
                         running = false;
-                    }
+                    },
                     WindowEvent::Resized(size) => {
                         window_size = size;
-                    }
+                    },
                     _ => (),
                 }
             }
@@ -108,7 +113,10 @@ fn run_gui() {
                 ui.plot_lines(im_str!("Frame time"), &frame_time_history)
                     .scale_max(1.0 / 20.0)
                     .scale_min(0.0)
-                    .overlay_text(&ImString::new(format!("{:.2} ms", frame_time * 1000.0)))
+                    .overlay_text(&ImString::new(format!(
+                        "{:.2} ms",
+                        frame_time * 1000.0
+                    )))
                     .build();
 
                 if ui::enum_combo(

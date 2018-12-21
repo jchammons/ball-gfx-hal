@@ -1,4 +1,10 @@
-use crate::game::{server::Game, GetPlayer, PlayerId, Snapshot, StaticPlayerState};
+use crate::game::{
+    server::Game,
+    GetPlayer,
+    PlayerId,
+    Snapshot,
+    StaticPlayerState,
+};
 use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
@@ -123,10 +129,12 @@ impl Packet {
         contents: &P,
     ) -> Result<Packet, Error> {
         // Write header and contents
-        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let size = bincode::serialized_size(contents)
+            .map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
         client.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
+        bincode::serialize_into(&mut packet, contents)
+            .map_err(Error::serialize)?;
 
         Ok(Packet {
             client: addr,
@@ -150,11 +158,13 @@ impl Packet {
         };
 
         // Write header and contents
-        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let size = bincode::serialized_size(contents)
+            .map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
         let client_state = clients_state.get_mut(&client).unwrap();
         client_state.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
+        bincode::serialize_into(&mut packet, contents)
+            .map_err(Error::serialize)?;
 
         Ok(Some(Packet {
             client,
@@ -171,11 +181,12 @@ impl Packet {
             Some(client) => {
                 self.client = client;
                 // Write the new header.
-                let connection = &mut clients_state.get_mut(&client).unwrap().connection;
+                let connection =
+                    &mut clients_state.get_mut(&client).unwrap().connection;
                 let cursor = Cursor::new(&mut self.packet[..HEADER_BYTES]);
                 connection.send_header(cursor)?;
                 Ok(true)
-            }
+            },
             None => Ok(false),
         }
     }
@@ -195,29 +206,34 @@ impl EventHandler for Server {
                 if event.readiness().is_writable() {
                     self.socket_writable();
                 }
-            }
+            },
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
                         TimeoutState::SendTick => {
                             self.send_tick();
-                        }
+                        },
                         TimeoutState::GameTick => {
                             self.game_tick();
-                        }
+                        },
                     }
                 }
-            }
-            SHUTDOWN => match self.shutdown.try_recv() {
-                Ok(()) => {
-                    info!("server received shutdown from handle");
-                    return true;
+            },
+            SHUTDOWN => {
+                match self.shutdown.try_recv() {
+                    Ok(()) => {
+                        info!("server received shutdown from handle");
+                        return true;
+                    },
+                    Err(TryRecvError::Disconnected) => {
+                        error!(
+                            "server handle has disconnected without sending \
+                             shutdown"
+                        );
+                        return true;
+                    },
+                    Err(TryRecvError::Empty) => (),
                 }
-                Err(TryRecvError::Disconnected) => {
-                    error!("server handle has disconnected without sending shutdown");
-                    return true;
-                }
-                Err(TryRecvError::Empty) => (),
             },
             _ => unreachable!(),
         }
@@ -227,7 +243,10 @@ impl EventHandler for Server {
 }
 
 impl Server {
-    pub fn new(addr: &SocketAddr, shutdown: Receiver<()>) -> Result<Server, Error> {
+    pub fn new(
+        addr: &SocketAddr,
+        shutdown: Receiver<()>,
+    ) -> Result<Server, Error> {
         let socket = UdpSocket::bind(addr).map_err(Error::bind_socket)?;
         let mut timer = timer::Builder::default()
             .tick_duration(Duration::from_millis(10))
@@ -271,12 +290,12 @@ impl Server {
                     } else {
                         break;
                     }
-                }
+                },
                 Ok((bytes_read, addr)) => {
                     if let Err(err) = self.on_recv(addr, bytes_read) {
                         error!("error receiving packet from {}: {}", addr, err);
                     }
-                }
+                },
             }
         }
     }
@@ -292,32 +311,33 @@ impl Server {
                         );
                     }
                     break;
-                }
+                },
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
                     if bytes_written < packet.packet.len() {
                         error!(
-                            "only wrote {} out of {} bytes for packet to {}: {:?}",
+                            "only wrote {} out of {} bytes for packet to {}: \
+                             {:?}",
                             bytes_written,
                             packet.packet.len(),
                             &packet.client,
                             &packet.packet
                         )
                     }
-                }
+                },
             }
 
             // If it got here, the packet must have actually been sent.
             match packet.next_packet(&mut self.clients) {
                 Ok(true) => {
                     // Continue as usual.
-                }
+                },
                 Ok(false) => {
                     self.send_queue.pop_front().unwrap();
-                }
+                },
                 Err(err) => {
                     error!("error writing header for packet: {}", err);
-                }
+                },
             }
         }
 
@@ -341,7 +361,9 @@ impl Server {
         let packets = self.clients.iter_mut().filter_map(|(&addr, client)| {
             let packet = ServerPacket::Snapshot {
                 snapshot: snapshot.clone(),
-                input_delay: now.duration_since(client.last_input).as_float_secs() as f32,
+                input_delay: now
+                    .duration_since(client.last_input)
+                    .as_float_secs() as f32,
             };
 
             // Don't stop on encountering errors.
@@ -426,7 +448,11 @@ impl Server {
         Ok(())
     }
 
-    fn on_recv(&mut self, addr: SocketAddr, bytes_read: usize) -> Result<(), Error> {
+    fn on_recv(
+        &mut self,
+        addr: SocketAddr,
+        bytes_read: usize,
+    ) -> Result<(), Error> {
         if bytes_read > MAX_PACKET_SIZE {
             return Err(Error::PacketTooLarge(bytes_read));
         }
@@ -437,22 +463,24 @@ impl Server {
                 // Existing player.
                 match client.connection.decode(Cursor::new(packet))?.0 {
                     ClientPacket::Input(input) => {
-                        if let Some(player) = self.game.player_mut(client.player) {
+                        if let Some(player) =
+                            self.game.player_mut(client.player)
+                        {
                             player.state.cursor = input.cursor;
                             client.last_input = Instant::now();
                         }
-                    }
+                    },
                     ClientPacket::Disconnect => {
                         self.remove_client(&addr)?;
-                    }
+                    },
                 }
-            }
+            },
             None => {
                 // New player.
                 let mut connection = Connection::default();
-                let (handshake, _, _) = connection.decode(Cursor::new(packet))?;
+                let (handshake, ..) = connection.decode(Cursor::new(packet))?;
                 self.new_client(addr, connection, &handshake)?;
-            }
+            },
         }
 
         Ok(())
@@ -470,9 +498,14 @@ impl Server {
             .map_err(Error::poll_register)
     }
 
-    fn send_to<P: Serialize>(&mut self, addr: SocketAddr, packet: &P) -> Result<(), Error> {
-        self.send_queue
-            .push_back(Packet::new(Some(addr), packet, &mut self.clients)?.unwrap());
+    fn send_to<P: Serialize>(
+        &mut self,
+        addr: SocketAddr,
+        packet: &P,
+    ) -> Result<(), Error> {
+        self.send_queue.push_back(
+            Packet::new(Some(addr), packet, &mut self.clients)?.unwrap(),
+        );
         self.reregister_socket(true)?;
         Ok(())
     }

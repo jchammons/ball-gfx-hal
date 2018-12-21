@@ -63,22 +63,32 @@ impl Acks {
 impl Connection {
     /// Processes the header of a received packet and returns it's
     /// sequence number, as well as acknowledged packets.
-    pub fn recv_header<B: Read>(&mut self, mut packet: B) -> Result<(u32, Acks), Error> {
+    pub fn recv_header<B: Read>(
+        &mut self,
+        mut packet: B,
+    ) -> Result<(u32, Acks), Error> {
         let sequence = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack_bits = packet.read_u32::<BE>().map_err(Error::header_read)?;
 
         self.acks.ack(sequence);
-        Ok((sequence, Acks { ack_bits, ack }))
+        Ok((
+            sequence,
+            Acks {
+                ack_bits,
+                ack,
+            },
+        ))
     }
 
-    pub fn send_header<B: Write>(&mut self, mut packet: B) -> Result<(), Error> {
+    pub fn send_header<B: Write>(
+        &mut self,
+        mut packet: B,
+    ) -> Result<(), Error> {
         packet
             .write_u32::<BE>(self.local_sequence)
             .map_err(Error::header_write)?;
-        packet
-            .write_u32::<BE>(self.acks.ack)
-            .map_err(Error::header_write)?;
+        packet.write_u32::<BE>(self.acks.ack).map_err(Error::header_write)?;
         packet
             .write_u32::<BE>(self.acks.ack_bits)
             .map_err(Error::header_write)?;
@@ -94,7 +104,8 @@ impl Connection {
         mut read: B,
     ) -> Result<(P, u32, Acks), Error> {
         let (sequence, acks) = self.recv_header(&mut read)?;
-        let packet = bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
+        let packet =
+            bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
         Ok((packet, sequence, acks))
     }
 }

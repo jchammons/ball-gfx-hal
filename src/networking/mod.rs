@@ -16,7 +16,8 @@ pub enum Error {
     #[fail(display = "connection timed out")]
     TimedOut,
     #[fail(
-        display = "got a packet of size {}, which is bigger than MAX_PACKET_SIZE",
+        display = "got a packet of size {}, which is bigger than \
+                   MAX_PACKET_SIZE",
         _0
     )]
     PacketTooLarge(usize),

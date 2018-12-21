@@ -1,6 +1,13 @@
 use crate::double_buffer::DoubleBuffer;
 use crate::game::{
-    step_dt, GetPlayer, Input, InputBuffer, InterpolatedSnapshot, PlayerId, PlayerState, Snapshot,
+    step_dt,
+    GetPlayer,
+    Input,
+    InputBuffer,
+    InterpolatedSnapshot,
+    PlayerId,
+    PlayerState,
+    Snapshot,
     StaticPlayerState,
 };
 use log::{debug, warn};
@@ -55,7 +62,9 @@ impl<'a, 'b: 'a> Players<'a, 'b> {
     /// If existential types ever get implemented, this can we swapped
     /// out.
     #[allow(clippy::should_implement_trait)]
-    pub fn into_iter(self) -> impl Iterator<Item = (PlayerId, Player<'b>)> + 'a {
+    pub fn into_iter(
+        self,
+    ) -> impl Iterator<Item = (PlayerId, Player<'b>)> + 'a {
         let Players {
             players,
             predicted,
@@ -100,8 +109,13 @@ impl Game {
     ) -> Game {
         Game {
             players: Mutex::new(players),
-            snapshots: Mutex::new(DoubleBuffer::new((snapshot, Instant::now()))),
-            input_buffer: Mutex::new(InputBuffer::new(Input { cursor })),
+            snapshots: Mutex::new(DoubleBuffer::new((
+                snapshot,
+                Instant::now(),
+            ))),
+            input_buffer: Mutex::new(InputBuffer::new(Input {
+                cursor,
+            })),
             player_id,
             predicted: Mutex::new(PlayerState::new(cursor)),
         }
@@ -118,9 +132,12 @@ impl Game {
     /// Updates the cursor position for this client player.
     pub fn update_cursor(&self, cursor: Point2<f32>) {
         self.predicted.lock().cursor = cursor;
-        self.input_buffer
-            .lock()
-            .store_input(Input { cursor }, Instant::now());
+        self.input_buffer.lock().store_input(
+            Input {
+                cursor,
+            },
+            Instant::now(),
+        );
     }
 
     /// Adds a new joined player.
@@ -142,7 +159,12 @@ impl Game {
     ///
     /// If `new` is `true`, the snapshot is the most recent. Otherwise
     /// it is old.
-    pub fn insert_snapshot(&self, mut snapshot: Snapshot, mut input_delay: f32, new: bool) {
+    pub fn insert_snapshot(
+        &self,
+        mut snapshot: Snapshot,
+        mut input_delay: f32,
+        new: bool,
+    ) {
         // Remove the client's player from the snapshot, and reconcile
         // predicted state.
         if let Some(player) = snapshot.players.remove(&self.player_id) {
@@ -164,7 +186,8 @@ impl Game {
                     }
                     cursor = input.cursor;
                 }
-                let dt = (input_buffer.delay(Instant::now()) - input_delay).max(0.0);
+                let dt =
+                    (input_buffer.delay(Instant::now()) - input_delay).max(0.0);
                 for dt in step_dt(dt, 1.0 / 60.0) {
                     ball.tick(dt, cursor);
                 }
@@ -185,7 +208,11 @@ impl Game {
     ///
     /// Note that mutexes will be locked for the duration of
     /// `process`, so don't block or anything.
-    pub fn players<O, F: FnOnce(Players) -> O>(&self, time: Instant, process: F) -> O {
+    pub fn players<O, F: FnOnce(Players) -> O>(
+        &self,
+        time: Instant,
+        process: F,
+    ) -> O {
         let snapshots = self.snapshots.lock();
         let &(ref old, old_time) = snapshots.get_old();
         let &(ref new, new_time) = snapshots.get();

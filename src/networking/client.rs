@@ -8,7 +8,11 @@ use crate::networking::{Error, MAX_PACKET_SIZE};
 use log::{error, info, trace};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
-use mio_extras::channel::{self as mio_channel, Receiver as MioReceiver, Sender as MioSender};
+use mio_extras::channel::{
+    self as mio_channel,
+    Receiver as MioReceiver,
+    Sender as MioSender,
+};
 use mio_extras::timer::{self, Timeout, Timer};
 use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
@@ -16,7 +20,10 @@ use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
 use std::sync::mpsc::{
-    self as std_channel, Receiver as StdReceiver, Sender as StdSender, TryRecvError,
+    self as std_channel,
+    Receiver as StdReceiver,
+    Sender as StdSender,
+    TryRecvError,
 };
 use std::sync::Arc;
 use std::thread;
@@ -94,7 +101,9 @@ pub fn connect(
         ClientHandle {
             shutdown: shutdown_tx,
         },
-        ConnectingHandle { done: done_rx },
+        ConnectingHandle {
+            done: done_rx,
+        },
     ))
 }
 
@@ -145,7 +154,7 @@ impl EventHandler for Client {
                     // down for real.
                     return true;
                 }
-            }
+            },
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
@@ -153,28 +162,34 @@ impl EventHandler for Client {
                             if let Err(err) = self.send_tick() {
                                 error!("error sending tick packet: {}", err);
                             }
-                        }
+                        },
                         TimeoutState::Connect => {
-                            if let ClientState::Connecting { ref mut done, .. } = self.state {
+                            if let ClientState::Connecting {
+                                ref mut done,
+                                ..
+                            } = self.state
+                            {
                                 let _ = done.send(Err(Error::TimedOut));
                                 info!("client connection timed out");
                                 return true;
                             }
+                        },
+                    }
+                }
+            },
+            SHUTDOWN => {
+                match self.shutdown.try_recv() {
+                    Ok(()) | Err(TryRecvError::Disconnected) => {
+                        info!("client started shutdown");
+                        if let Err(err) = self.send(&ClientPacket::Disconnect) {
+                            error!("failed to send disconnect packet: {}", err);
+                            // If this errored, just shut down immediately.
+                            return true;
                         }
-                    }
+                        self.needs_shutdown = true;
+                    },
+                    Err(TryRecvError::Empty) => (),
                 }
-            }
-            SHUTDOWN => match self.shutdown.try_recv() {
-                Ok(()) | Err(TryRecvError::Disconnected) => {
-                    info!("client started shutdown");
-                    if let Err(err) = self.send(&ClientPacket::Disconnect) {
-                        error!("failed to send disconnect packet: {}", err);
-                        // If this errored, just shut down immediately.
-                        return true;
-                    }
-                    self.needs_shutdown = true;
-                }
-                Err(TryRecvError::Empty) => (),
             },
             Token(_) => unreachable!(),
         }
@@ -190,7 +205,8 @@ impl Client {
         shutdown: MioReceiver<()>,
         cursor: Point2<f32>,
     ) -> Result<Client, Error> {
-        let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap()).map_err(Error::bind_socket)?;
+        let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap())
+            .map_err(Error::bind_socket)?;
         socket.connect(addr).map_err(Error::connect_socket)?;
         let mut timer = timer::Builder::default()
             .tick_duration(Duration::from_millis(10))
@@ -203,7 +219,8 @@ impl Client {
         poll.register(&shutdown, SHUTDOWN, Ready::readable(), PollOpt::edge())
             .map_err(Error::poll_register)?;
 
-        let timeout = timer.set_timeout(Duration::from_secs(5), TimeoutState::Connect);
+        let timeout =
+            timer.set_timeout(Duration::from_secs(5), TimeoutState::Connect);
 
         let mut client = Client {
             socket,
@@ -222,7 +239,9 @@ impl Client {
         };
 
         // Send handshake
-        client.send(&ClientHandshake { cursor })?;
+        client.send(&ClientHandshake {
+            cursor,
+        })?;
 
         Ok(client)
     }
@@ -234,14 +253,14 @@ impl Client {
                     if let Err(err) = self.on_recv(bytes_read) {
                         error!("{}", err);
                     }
-                }
+                },
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
                         error!("error receiving packet on client: {}", err);
                     } else {
                         break;
                     }
-                }
+                },
             }
         }
     }
@@ -251,22 +270,26 @@ impl Client {
             match self.socket.send(&packet) {
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
-                        error!("error sending packet from client ({:?}): {}", &packet, err);
+                        error!(
+                            "error sending packet from client ({:?}): {}",
+                            &packet, err
+                        );
                     } else {
                         break;
                     }
-                }
+                },
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
                     if bytes_written < packet.len() {
                         error!(
-                            "Only wrote {} out of {} bytes for client packet: {:?}",
+                            "Only wrote {} out of {} bytes for client packet: \
+                             {:?}",
                             bytes_written,
                             packet.len(),
                             &packet
                         )
                     }
-                }
+                },
             }
         }
 
@@ -275,7 +298,12 @@ impl Client {
             // more packets to send.
             if let Err(err) = self
                 .poll
-                .reregister(&self.socket, SOCKET, Ready::readable(), PollOpt::edge())
+                .reregister(
+                    &self.socket,
+                    SOCKET,
+                    Ready::readable(),
+                    PollOpt::edge(),
+                )
                 .map_err(Error::poll_register)
             {
                 error!("{}", err);
@@ -302,7 +330,7 @@ impl Client {
 
                 trace!("sending tick packet to server: {:?}", packet);
                 self.send(&packet)?;
-            }
+            },
             // We shouldn't really be sending ticks in any other state.
             _ => unreachable!(),
         }
@@ -324,9 +352,9 @@ impl Client {
                 ref cursor,
             } => {
                 // Assumed to be a handshake packet.
-                let (handshake, sequence, _) = self
-                    .connection
-                    .decode::<_, ServerHandshake>(Cursor::new(packet))?;
+                let (handshake, sequence, _) =
+                    self.connection
+                        .decode::<_, ServerHandshake>(Cursor::new(packet))?;
                 let game = Arc::new(Game::new(
                     handshake.players,
                     handshake.snapshot,
@@ -348,14 +376,15 @@ impl Client {
                     tick,
                     snapshot_seq_ids: DoubleBuffer::new(sequence),
                 })
-            }
+            },
 
             ClientState::Connected {
                 ref mut game,
                 ref mut snapshot_seq_ids,
                 ..
             } => {
-                let (packet, sequence, acks) = self.connection.decode(Cursor::new(packet))?;
+                let (packet, sequence, acks) =
+                    self.connection.decode(Cursor::new(packet))?;
                 game.input_buffer.lock().packet_acks(acks);
                 match packet {
                     ServerPacket::Snapshot {
@@ -377,19 +406,22 @@ impl Client {
                         }
                         // Otherwise it's really old and we don't
                         // care.
-                    }
-                    ServerPacket::PlayerJoined { id, static_state } => {
+                    },
+                    ServerPacket::PlayerJoined {
+                        id,
+                        static_state,
+                    } => {
                         info!("new player joined: {}", id);
                         game.add_player(id, static_state);
-                    }
+                    },
                     ServerPacket::PlayerLeft(id) => {
                         info!("player {} left", id);
                         game.remove_player(id);
-                    }
+                    },
                 }
 
                 None
-            }
+            },
         };
 
         if let Some(transition) = transition {
@@ -405,10 +437,12 @@ impl Client {
             return Ok(());
         }
 
-        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let size = bincode::serialized_size(contents)
+            .map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
         self.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
+        bincode::serialize_into(&mut packet, contents)
+            .map_err(Error::serialize)?;
         self.send_queue.push_back(packet);
         self.poll
             .reregister(
