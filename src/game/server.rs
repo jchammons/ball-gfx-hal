@@ -16,6 +16,17 @@ use std::collections::HashMap;
 /// sample.
 const HUE_CANDIDATES_PER_SAMPLE: usize = 8;
 
+/// Gets the distance between two hue values, specified from 0 to 1.
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let dist = (a - b).abs();
+    if dist > 0.5 {
+        // Wrap around the outside of the circle.
+        1.0 - dist
+    } else {
+        dist
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Player {
     pub state: PlayerState,
@@ -98,12 +109,12 @@ impl Game {
             // Unwrap is okay because we already know self.players and
             // samples are both not empty.
             samples
-                .ord_subset_max_by_key(|hue| {
+                .ord_subset_max_by_key(|&hue| {
                     self.players
                         .values()
                         .map(|player| player.hue)
-                        .ord_subset_min_by_key(|player_hue| {
-                            (hue - player_hue).abs()
+                        .ord_subset_min_by_key(|&player_hue| {
+                            hue_distance(hue, player_hue)
                         })
                         .unwrap()
                 })
