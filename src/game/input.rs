@@ -1,4 +1,3 @@
-use crate::networking::connection::Acks;
 use either::Either;
 use log::warn;
 use nalgebra::Point2;
@@ -38,6 +37,8 @@ pub struct InputBuffer {
     inputs: VecDeque<(Input, f32)>,
     /// Absolute index of the most recently sent packet.
     last_packet: usize,
+    /// Generated sequence number for the last sent packet.
+    sequence: u32,
 }
 
 impl InputBuffer {
@@ -49,6 +50,7 @@ impl InputBuffer {
             sent_packets: Vec::new(),
             inputs: VecDeque::new(),
             last_packet: 0,
+            sequence: 0,
         }
     }
 
@@ -85,68 +87,70 @@ impl InputBuffer {
         self.latest = (input, now);
     }
 
-    /// Returns all inputs that occured since the last packet.
+    /// Returns all inputs that occured since the last packet, and the
+    /// sequence number generated for this packet.
     ///
-    /// This also stores a new sent packet, using the provided
-    /// sequence number.
+    /// If there are no new inputs, the sequence number will be the
+    /// same as the previous generated packet.
     pub fn packet_send<'a>(
         &'a mut self,
-        sequence: u32,
-    ) -> impl Iterator<Item = Input> + 'a {
+    ) -> (u32, impl Iterator<Item = Input> + 'a) {
         if self.input_count != 0 {
+            if self.input_count != self.last_packet {
+                // If there are any new inputs, increment the sequence
+                // id.
+                self.sequence += 1;
+            }
             // Determine index offset of most recently sent packet in the
             // inputs array.
-            let num_inputs = self.input_count - self.last_packet;
-            // Determine the range of new inputs.
-            let start = self.inputs.len() - num_inputs.min(MAX_INPUT_BUFFER);
+            let start = self.index_of(self.last_packet);
             // Store the new packet as sent.
-            self.sent_packets.push((sequence, self.input_count));
+            self.sent_packets.push((self.sequence, self.input_count));
             self.last_packet = self.input_count;
             // Unfortunately, there isn't a nice way to get an iterator
             // for a range in VecDeque.
-            Either::Left(
-                (0..num_inputs)
-                    .map(move |idx| self.inputs[idx + start].0.clone()),
+            (
+                self.sequence,
+                Either::Left(
+                    (start..self.inputs.len())
+                        .map(move |idx| self.inputs[idx].0),
+                ),
             )
         } else {
-            Either::Right(iter::empty())
+            (self.sequence, Either::Right(iter::empty()))
         }
     }
 
-    /// Clears out old buffered inputs corresponding to a set of
-    /// acknowledged packets.
+    /// Clears out old buffered inputs, up until a given packet sequence id.
     ///
     /// Returns true if any new packets were acknowledged.
-    pub fn packet_acks(&mut self, acks: Acks) -> bool {
-        // Find the most recent acknowledged packet that was actually
-        // an input packet.
-        let sequence = self
+    pub fn packet_ack(&mut self, sequence: u32) -> bool {
+        // Find the latest packet that is at least as old as sequence.
+        let (idx, &(_, end)) = match self
             .sent_packets
             .iter()
-            .map(|&(sequence, _)| sequence)
-            .filter(|&sequence| acks.contains(sequence))
-            .max();
-        let sequence = match sequence {
+            .enumerate()
+            // Search from the end, to find the most recent instead of
+            // the oldest.
+            .rfind(|(_, &(sent_sequence, _))| sent_sequence <= sequence)
+        {
             Some(sequence) => sequence,
             None => return false,
         };
 
-        // Since packets may be acknowledged out of order, there's not
-        // really a nice way to check which ones are older without
-        // iterating through the entire thing.
-        let mut clear_to = 0;
-        self.sent_packets.retain(|&(sent_sequence, end)| {
-            let old = sent_sequence <= sequence;
-            if old {
-                clear_to = clear_to.max(end);
-            }
-            !old
-        });
-        // Clear out old packets.
-        let num_inputs = self.input_count - clear_to;
-        let end = self.inputs.len() - num_inputs.min(MAX_INPUT_BUFFER);
-        self.inputs.drain(..end);
+        // Clear out the sent packets.
+        self.sent_packets.drain(..=idx);
+        self.inputs.drain(..self.index_of(end));
 
         true
+    }
+
+    /// Gets the index in the `inputs` array, corresponding to an
+    /// absolute input index.
+    ///
+    /// If `idx` does not fall within the max length of the inputs
+    /// buffer, it is clipped.
+    fn index_of(&self, idx: usize) -> usize {
+        self.inputs.len() - (self.input_count - idx).min(MAX_INPUT_BUFFER)
     }
 }

@@ -44,8 +44,9 @@ pub enum ServerPacket {
     Snapshot {
         // TODO: avoid cloning the snapshot a bunch of times!
         snapshot: Snapshot,
-        /// Time since the last received input.
-        input_delay: f32,
+        /// Last received input sequence, and the time in seconds
+        /// since it was received.
+        last_input: (u32, f32),
     },
 }
 
@@ -59,7 +60,8 @@ pub struct ServerHandshake {
 struct Client {
     player: PlayerId,
     connection: Connection,
-    last_input: Instant,
+    /// Sequence id of the last input, and the time it was received.
+    last_input: (u32, Instant),
 }
 
 /// Contains a message and a list of clients to send the message to.
@@ -359,11 +361,11 @@ impl Server {
         let snapshot = self.game.snapshot();
         trace!("sending snapshot: {:#?}", snapshot);
         let packets = self.clients.iter_mut().filter_map(|(&addr, client)| {
+            let input_delay =
+                now.duration_since(client.last_input.1).as_float_secs() as f32;
             let packet = ServerPacket::Snapshot {
                 snapshot: snapshot.clone(),
-                input_delay: now
-                    .duration_since(client.last_input)
-                    .as_float_secs() as f32,
+                last_input: (client.last_input.0, input_delay),
             };
 
             // Don't stop on encountering errors.
@@ -410,7 +412,7 @@ impl Server {
             Client {
                 player: player_id,
                 connection,
-                last_input: Instant::now(),
+                last_input: (0, Instant::now()),
             },
         );
 
@@ -462,12 +464,17 @@ impl Server {
             Some(client) => {
                 // Existing player.
                 match client.connection.decode(Cursor::new(packet))?.0 {
-                    ClientPacket::Input(input) => {
+                    ClientPacket::Input {
+                        input,
+                        sequence,
+                    } => {
                         if let Some(player) =
                             self.game.player_mut(client.player)
                         {
-                            player.state.cursor = input.cursor;
-                            client.last_input = Instant::now();
+                            if sequence > client.last_input.0 {
+                                player.state.cursor = input.cursor;
+                                client.last_input = (sequence, Instant::now());
+                            }
                         }
                     },
                     ClientPacket::Disconnect => {
