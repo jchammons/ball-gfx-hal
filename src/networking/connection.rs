@@ -49,7 +49,7 @@ impl Acks {
     }
 
     /// Returns an iterator over the acked packets.
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = u32> + 'a {
+    pub fn iter(self) -> impl Iterator<Item = u32> {
         (0..32).filter_map(move |offset| {
             if self.ack_bits | (1 << offset) != 0 {
                 Some(self.ack - offset)

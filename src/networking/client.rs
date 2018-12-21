@@ -41,7 +41,10 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
-    Input(Input),
+    Input {
+        sequence: u32,
+        input: Input,
+    },
     Disconnect,
 }
 
@@ -323,9 +326,11 @@ impl Client {
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
                 let mut input_buffer = game.input_buffer.lock();
-                let sequence = self.connection.local_sequence;
-                input_buffer.packet_send(sequence);
-                let packet = ClientPacket::Input(*input_buffer.latest());
+                let (sequence, _) = input_buffer.packet_send();
+                let packet = ClientPacket::Input {
+                    input: *input_buffer.latest(),
+                    sequence,
+                };
                 drop(input_buffer);
 
                 trace!("sending tick packet to server: {:?}", packet);
@@ -383,14 +388,14 @@ impl Client {
                 ref mut snapshot_seq_ids,
                 ..
             } => {
-                let (packet, sequence, acks) =
+                let (packet, sequence, _) =
                     self.connection.decode(Cursor::new(packet))?;
-                game.input_buffer.lock().packet_acks(acks);
                 match packet {
                     ServerPacket::Snapshot {
                         snapshot,
-                        input_delay,
+                        last_input: (input_sequence, input_delay),
                     } => {
+                        game.input_buffer.lock().packet_ack(input_sequence);
                         trace!("got snapshot from server");
                         if sequence > *snapshot_seq_ids.get() {
                             // Things are normal, rotate the buffers
