@@ -1,5 +1,5 @@
-use crate::game::{GameServer, PlayerClient, PlayerId, Snapshot};
-use crate::networking::client::ClientPacket;
+use crate::game::{server::Game, GetPlayer, PlayerId, Snapshot, StaticPlayerState};
+use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
@@ -9,7 +9,7 @@ use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self, Receiver, Sender};
 use mio_extras::timer::{self, Timer};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::Cursor;
@@ -30,21 +30,30 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerPacket {
-    PlayerJoined { id: PlayerId, player: PlayerClient },
+    PlayerJoined {
+        id: PlayerId,
+        static_state: StaticPlayerState,
+    },
     PlayerLeft(PlayerId),
-    Snapshot(Snapshot),
+    Snapshot {
+        // TODO: avoid cloning the snapshot a bunch of times!
+        snapshot: Snapshot,
+        /// Time since the last received input.
+        input_delay: f32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerHandshake {
     pub id: PlayerId,
-    pub players: HashMap<PlayerId, PlayerClient>,
+    pub players: HashMap<PlayerId, StaticPlayerState>,
     pub snapshot: Snapshot,
 }
 
 struct Client {
     player: PlayerId,
     connection: Connection,
+    last_input: Instant,
 }
 
 /// Contains a message and a list of clients to send the message to.
@@ -66,7 +75,7 @@ pub struct Server {
     recv_buffer: [u8; MAX_PACKET_SIZE],
     send_queue: VecDeque<Packet>,
     clients: HashMap<SocketAddr, Client>,
-    game: GameServer,
+    game: Game,
     send_tick: Interval,
     game_tick: Interval,
     poll: Poll,
@@ -75,23 +84,6 @@ pub struct Server {
 
 pub struct ServerHandle {
     pub shutdown: Sender<()>,
-}
-
-impl Client {
-    fn new(player: PlayerId) -> Client {
-        // Ignore the handshake for now.
-        Client {
-            player,
-            connection: Connection::default(),
-        }
-    }
-
-    fn decode<'a, P: DeserializeOwned>(&mut self, packet: &'a [u8]) -> Result<P, Error> {
-        let mut read = Cursor::new(packet);
-        self.connection.recv_header(&mut read)?;
-        let packet = bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
-        Ok(packet)
-    }
 }
 
 /// Launches a server bound to a particular address.
@@ -124,6 +116,25 @@ impl Drop for ServerHandle {
 }
 
 impl Packet {
+    /// Constructs a new packet for a single client.
+    pub fn single_client<P: Serialize>(
+        addr: SocketAddr,
+        client: &mut Client,
+        contents: &P,
+    ) -> Result<Packet, Error> {
+        // Write header and contents
+        let size = bincode::serialized_size(contents).map_err(Error::serialize)? as usize;
+        let mut packet = Vec::with_capacity(size + HEADER_BYTES);
+        client.connection.send_header(&mut packet)?;
+        bincode::serialize_into(&mut packet, contents).map_err(Error::serialize)?;
+
+        Ok(Packet {
+            client: addr,
+            remaining: Vec::new(),
+            packet,
+        })
+    }
+
     /// Poossibly constructs a new packet, but returns `None` if
     /// `clients` is empty.
     pub fn new<I: IntoIterator<Item = SocketAddr>, P: Serialize>(
@@ -189,9 +200,7 @@ impl EventHandler for Server {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
                         TimeoutState::SendTick => {
-                            if let Err(err) = self.send_tick() {
-                                error!("error when sending tick: {}", err);
-                            }
+                            self.send_tick();
                         }
                         TimeoutState::GameTick => {
                             self.game_tick();
@@ -244,7 +253,7 @@ impl Server {
             recv_buffer: [0; MAX_PACKET_SIZE],
             send_queue: VecDeque::new(),
             clients: HashMap::new(),
-            game: GameServer::default(),
+            game: Game::default(),
             send_tick,
             game_tick,
             poll,
@@ -321,17 +330,31 @@ impl Server {
         }
     }
 
-    fn send_tick(&mut self) -> Result<(), Error> {
+    fn send_tick(&mut self) {
         // Send a snapshot to all connected clients.
         let now = Instant::now();
         let (_, interval) = self.send_tick.next(now);
         self.timer.set_timeout(interval, TimeoutState::SendTick);
 
-        trace!("sending snapshot to clients");
-        let packet = ServerPacket::Snapshot(self.game.snapshot());
-        self.broadcast(&packet)?;
+        let snapshot = self.game.snapshot();
+        trace!("sending snapshot: {:#?}", snapshot);
+        let packets = self.clients.iter_mut().filter_map(|(&addr, client)| {
+            let packet = ServerPacket::Snapshot {
+                snapshot: snapshot.clone(),
+                input_delay: now.duration_since(client.last_input).as_float_secs() as f32,
+            };
 
-        Ok(())
+            // Don't stop on encountering errors.
+            Packet::single_client(addr, client, &packet)
+                .map_err(|err| {
+                    error!("error sending tick to {}: {}", &addr, err);
+                })
+                .ok()
+        });
+        self.send_queue.extend(packets);
+        if let Err(err) = self.reregister_socket(true) {
+            error!("failed to reregister socket as writable: {}", err);
+        }
     }
 
     fn game_tick(&mut self) {
@@ -350,20 +373,32 @@ impl Server {
         self.game.tick(dt);
     }
 
-    fn new_client(&mut self, addr: SocketAddr) -> Result<(), Error> {
+    fn new_client(
+        &mut self,
+        addr: SocketAddr,
+        connection: Connection,
+        handshake: &ClientHandshake,
+    ) -> Result<(), Error> {
         info!("new player from {}", addr);
-        let player = self.game.add_player();
+        let (player_id, player) = self.game.add_player(handshake.cursor);
+        let static_state = player.static_state().clone();
         // Now start processing this client.
-        self.clients.insert(addr, Client::new(player));
+        self.clients.insert(
+            addr,
+            Client {
+                player: player_id,
+                connection,
+                last_input: Instant::now(),
+            },
+        );
 
         // Send handshake message to the new client.
         let packet = ServerHandshake {
-            id: player,
+            id: player_id,
             players: self
                 .game
-                .players
-                .iter()
-                .map(|(&id, player)| (id, player.as_client()))
+                .players()
+                .map(|(id, player)| (id, player.static_state().clone()))
                 .collect(),
             snapshot: self.game.snapshot(),
         };
@@ -371,8 +406,8 @@ impl Server {
 
         // Broadcast join message to the every other client.
         let packet = ServerPacket::PlayerJoined {
-            id: player,
-            player: self.game.players[&player].as_client(),
+            id: player_id,
+            static_state,
         };
         self.broadcast_filter(|client_addr, _| client_addr != &addr, &packet)?;
 
@@ -400,10 +435,11 @@ impl Server {
         match self.clients.get_mut(&addr) {
             Some(client) => {
                 // Existing player.
-                match client.decode(packet)? {
-                    ClientPacket::Input { position } => {
-                        if let Some(player) = self.game.players.get_mut(&client.player) {
-                            player.position = position;
+                match client.connection.decode(Cursor::new(packet))?.0 {
+                    ClientPacket::Input(input) => {
+                        if let Some(player) = self.game.player_mut(client.player) {
+                            player.state.cursor = input.cursor;
+                            client.last_input = Instant::now();
                         }
                     }
                     ClientPacket::Disconnect => {
@@ -413,7 +449,9 @@ impl Server {
             }
             None => {
                 // New player.
-                self.new_client(addr)?;
+                let mut connection = Connection::default();
+                let (handshake, _, _) = connection.decode(Cursor::new(packet))?;
+                self.new_client(addr, connection, &handshake)?;
             }
         }
 

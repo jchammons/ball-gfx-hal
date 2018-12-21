@@ -1,15 +1,14 @@
-use crate::game::{GameClient, PlayerClient, BALL_RADIUS, CURSOR_RADIUS};
+use crate::game::{client::Game, GetPlayer};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
     client::{self, ClientHandle, ConnectingHandle},
     server::{self, ServerHandle},
 };
-use arrayvec::ArrayVec;
-use cgmath::Point2;
 use gfx_hal::Backend;
 use imgui::{im_str, ImString, Ui};
 use log::{error, warn};
+use nalgebra::Point2;
 use palette::LinSrgb;
 use std::iter;
 use std::marker::PhantomData;
@@ -17,19 +16,24 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use winit::{ElementState, MouseButton, Window, WindowEvent};
+use winit::{dpi::LogicalPosition, dpi::LogicalSize, ElementState, MouseButton, WindowEvent};
 
 const SCALE: f32 = 0.9;
-const BOUNDS_CIRCLE: Circle = Circle {
-    center: Point2 { x: 0.0, y: 0.0 },
-    radius: SCALE,
-    color: LinSrgb {
-        red: 1.0,
-        green: 1.0,
-        blue: 1.0,
-        standard: PhantomData,
-    },
-};
+/// This is a function since `Point2::new` isn't `const fn`.
+///
+/// Hopefully the compiler can optimize this as expected.
+fn bounds_circle() -> Circle {
+    Circle {
+        center: Point2::new(0.0, 0.0),
+        radius: SCALE,
+        color: LinSrgb {
+            red: 1.0,
+            green: 1.0,
+            blue: 1.0,
+            standard: PhantomData,
+        },
+    }
+}
 
 pub struct ConnectingState {
     server: Option<ServerHandle>,
@@ -42,19 +46,20 @@ pub enum GameState {
         server_addr: ImString,
         server_addr_host: ImString,
         connecting: Option<ConnectingState>,
+        cursor: Point2<f32>,
     },
     InGame {
         server: Option<ServerHandle>,
         client: ClientHandle,
-        game: Arc<GameClient>,
+        game: Arc<Game>,
         locked: bool,
     },
 }
 
 impl ConnectingState {
-    fn host(addr: SocketAddr) -> Result<ConnectingState, networking::Error> {
+    fn host(addr: SocketAddr, cursor: Point2<f32>) -> Result<ConnectingState, networking::Error> {
         let (server, _) = server::host(addr)?;
-        let (client, connecting) = client::connect(addr)?;
+        let (client, connecting) = client::connect(addr, cursor)?;
         Ok(ConnectingState {
             server: Some(server),
             client,
@@ -62,8 +67,11 @@ impl ConnectingState {
         })
     }
 
-    fn connect(addr: SocketAddr) -> Result<ConnectingState, networking::Error> {
-        let (client, connecting) = client::connect(addr)?;
+    fn connect(
+        addr: SocketAddr,
+        cursor: Point2<f32>,
+    ) -> Result<ConnectingState, networking::Error> {
+        let (client, connecting) = client::connect(addr, cursor)?;
         Ok(ConnectingState {
             server: None,
             client,
@@ -78,6 +86,7 @@ impl Default for GameState {
             server_addr: ImString::with_capacity(64),
             server_addr_host: ImString::new("0.0.0.0:6666"),
             connecting: None,
+            cursor: Point2::new(0.0, 0.0),
         }
     }
 }
@@ -87,22 +96,29 @@ impl GameState {
         mem::replace(self, state);
     }
 
-    pub fn handle_event(&mut self, window: &Window, event: &WindowEvent) {
+    pub fn handle_event(&mut self, size: &LogicalSize, event: &WindowEvent) {
+        let cursor_pos = |position: &LogicalPosition| {
+            let scale = (2.0 / size.width.min(size.height) as f32) / SCALE;
+            Point2::new(
+                scale * (position.x as f32 - 0.5 * size.width as f32),
+                scale * (position.y as f32 - 0.5 * size.height as f32),
+            )
+        };
+
         match self {
-            GameState::MainMenu { .. } => (),
+            GameState::MainMenu { ref mut cursor, .. } => match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    *cursor = cursor_pos(position);
+                }
+                _ => (),
+            },
             GameState::InGame {
                 ref game,
                 ref mut locked,
                 ..
             } => match event {
                 WindowEvent::CursorMoved { position, .. } if !*locked => {
-                    let size = window.get_inner_size().unwrap();
-                    let scale = (2.0 / size.width.min(size.height) as f32) / SCALE;
-                    let position = Point2::new(
-                        scale * (position.x as f32 - 0.5 * size.width as f32),
-                        scale * (position.y as f32 - 0.5 * size.height as f32),
-                    );
-                    game.update_position(position);
+                    game.update_cursor(cursor_pos(position));
                 }
                 WindowEvent::MouseInput {
                     state,
@@ -147,11 +163,6 @@ impl GameState {
                 }
             }
             GameState::InGame { ref game, .. } => {
-                let mut dt = dt;
-                while dt > 1.0 / 60.0 {
-                    game.tick(1.0 / 60.0);
-                    dt -= 1.0 / 60.0;
-                }
                 game.tick(dt);
             }
         };
@@ -167,6 +178,7 @@ impl GameState {
                 ref mut server_addr,
                 ref mut server_addr_host,
                 ref mut connecting,
+                ref cursor,
             } => {
                 ui.window(im_str!("Main Menu"))
                     .always_auto_resize(true)
@@ -180,7 +192,7 @@ impl GameState {
                             .build();
                         if ui.small_button(im_str!("Connect to server")) {
                             match server_addr.to_str().parse() {
-                                Ok(addr) => match ConnectingState::connect(addr) {
+                                Ok(addr) => match ConnectingState::connect(addr, *cursor) {
                                     Ok(state) => *connecting = Some(state),
                                     Err(err) => error!("error hosting server: {}", err),
                                 },
@@ -196,7 +208,7 @@ impl GameState {
                             .build();
                         if ui.small_button(im_str!("Host server")) {
                             match server_addr_host.to_str().parse() {
-                                Ok(addr) => match ConnectingState::host(addr) {
+                                Ok(addr) => match ConnectingState::host(addr, *cursor) {
                                     Ok(state) => *connecting = Some(state),
                                     Err(err) => error!("error connecting to server: {}", err),
                                 },
@@ -220,33 +232,17 @@ impl GameState {
     ) {
         match self {
             GameState::MainMenu { .. } => {
-                circle_rend.draw(ctx, iter::once(BOUNDS_CIRCLE));
+                circle_rend.draw(ctx, iter::once(bounds_circle()));
             }
             GameState::InGame { game, .. } => {
-                let players = game.players.lock();
-                let snapshot = game.interpolate_snapshot(now);
-                let circles = iter::once(BOUNDS_CIRCLE).chain(
-                    snapshot
-                        .players()
-                        .filter_map(|(id, player)| {
-                            players.get(&id).map(|&PlayerClient { color, .. }| {
-                                let cursor = Circle {
-                                    center: player.position * SCALE,
-                                    radius: CURSOR_RADIUS * SCALE,
-                                    color,
-                                };
-                                let ball = Circle {
-                                    center: player.position_ball * SCALE,
-                                    radius: BALL_RADIUS * SCALE,
-                                    color,
-                                };
-                                ArrayVec::from([cursor, ball])
-                            })
-                        })
-                        .flatten(),
-                );
-
-                circle_rend.draw(ctx, circles);
+                game.players(now, |players| {
+                    let circles = iter::once(bounds_circle()).chain(
+                        players
+                            .into_iter()
+                            .flat_map(|(_, player)| player.draw(SCALE)),
+                    );
+                    circle_rend.draw(ctx, circles)
+                });
             }
         }
     }
