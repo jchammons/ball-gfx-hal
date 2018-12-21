@@ -18,7 +18,6 @@ lazy_static! {
 
 /// Sets this the global logger.
 pub fn apply() -> Result<(), log::SetLoggerError> {
-    eprintln!("{} {}", log::STATIC_MAX_LEVEL, log::max_level());
     log::set_max_level(LevelFilter::Info);
     log::set_logger(&*LOGGER)
 }
