@@ -1,4 +1,11 @@
-use crate::game::{step_dt, GetPlayer, PlayerId, PlayerState, Snapshot, StaticPlayerState};
+use crate::game::{
+    step_dt,
+    GetPlayer,
+    PlayerId,
+    PlayerState,
+    Snapshot,
+    StaticPlayerState,
+};
 use nalgebra::Point2;
 use ord_subset::OrdSubsetIterExt;
 use palette::{LabHue, Lch};
@@ -95,7 +102,9 @@ impl Game {
                     self.players
                         .values()
                         .map(|player| player.hue)
-                        .ord_subset_min_by_key(|player_hue| (hue - player_hue).abs())
+                        .ord_subset_min_by_key(|player_hue| {
+                            (hue - player_hue).abs()
+                        })
                         .unwrap()
                 })
                 .unwrap()

@@ -12,7 +12,9 @@ pub trait Interpolate {
 // Linear interpolation for any normed vector space or metric space.
 impl<T> Interpolate for T
 where
-    T: Clone + Sub<T> + Add<<<T as Sub>::Output as Mul<f32>>::Output, Output = T>,
+    T: Clone
+        + Sub<T>
+        + Add<<<T as Sub>::Output as Mul<f32>>::Output, Output = T>,
     <T as Sub<T>>::Output: Mul<f32>,
 {
     type Output = T;
@@ -58,8 +60,16 @@ pub struct InterpolatedSnapshot<'a> {
 }
 
 impl<'a> InterpolatedSnapshot<'a> {
-    pub fn new(alpha: f32, old: &'a Snapshot, new: &'a Snapshot) -> InterpolatedSnapshot<'a> {
-        InterpolatedSnapshot { alpha, old, new }
+    pub fn new(
+        alpha: f32,
+        old: &'a Snapshot,
+        new: &'a Snapshot,
+    ) -> InterpolatedSnapshot<'a> {
+        InterpolatedSnapshot {
+            alpha,
+            old,
+            new,
+        }
     }
 
     pub fn players(self) -> impl Iterator<Item = (PlayerId, PlayerState)> + 'a {

@@ -100,7 +100,9 @@ impl PlayerState {
         PlayerState {
             cursor,
             ball: Ball {
-                position: cursor + (cursor - Point2::origin()).normalize() * BALL_START_DISTANCE,
+                position: cursor +
+                    (cursor - Point2::origin()).normalize() *
+                        BALL_START_DISTANCE,
                 velocity: Vector2::zero(),
             },
         }

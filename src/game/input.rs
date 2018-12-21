@@ -89,7 +89,10 @@ impl InputBuffer {
     ///
     /// This also stores a new sent packet, using the provided
     /// sequence number.
-    pub fn packet_send<'a>(&'a mut self, sequence: u32) -> impl Iterator<Item = Input> + 'a {
+    pub fn packet_send<'a>(
+        &'a mut self,
+        sequence: u32,
+    ) -> impl Iterator<Item = Input> + 'a {
         if self.input_count != 0 {
             // Determine index offset of most recently sent packet in the
             // inputs array.
@@ -101,7 +104,10 @@ impl InputBuffer {
             self.last_packet = self.input_count;
             // Unfortunately, there isn't a nice way to get an iterator
             // for a range in VecDeque.
-            Either::Left((0..num_inputs).map(move |idx| self.inputs[idx + start].0.clone()))
+            Either::Left(
+                (0..num_inputs)
+                    .map(move |idx| self.inputs[idx + start].0.clone()),
+            )
         } else {
             Either::Right(iter::empty())
         }

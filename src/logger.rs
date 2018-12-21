@@ -41,7 +41,8 @@ pub struct Logger {
 
 #[derive(Debug)]
 struct LoggerInternal {
-    // Records are cheap, infrequent, and have a small fixed size, so just use VecDeque.
+    // Records are cheap, infrequent, and have a small fixed size, so just use
+    // VecDeque.
     records: VecDeque<Record>,
     // The actual text is unknown size though.
     text: Vec<u8>,
@@ -142,7 +143,9 @@ impl Log for Logger {
             let msg = unsafe {
                 // Garaunteed to be UTF8 as long as the null
                 // terminator isn't included, hence the head - 1.
-                str::from_utf8_unchecked(&internal.text[start..internal.head - 1])
+                str::from_utf8_unchecked(
+                    &internal.text[start..internal.head - 1],
+                )
             };
             println!("{} {}", level, msg);
 
@@ -194,16 +197,28 @@ impl Logger {
                 for record in internal.records.iter() {
                     if record.level <= filter {
                         let (color, level) = match record.level {
-                            Level::Error => ((0.75, 0.25, 0.25, 1.0), im_str!("[ERR]")),
-                            Level::Warn => ((0.75, 0.75, 0.25, 1.0), im_str!("[WRN]")),
-                            Level::Info => ((0.25, 0.75, 0.25, 1.0), im_str!("[INF]")),
-                            Level::Debug => ((0.5, 0.5, 0.75, 1.0), im_str!("[DBG]")),
-                            Level::Trace => ((0.25, 0.25, 0.25, 1.0), im_str!("[TRC]")),
+                            Level::Error => {
+                                ((0.75, 0.25, 0.25, 1.0), im_str!("[ERR]"))
+                            },
+                            Level::Warn => {
+                                ((0.75, 0.75, 0.25, 1.0), im_str!("[WRN]"))
+                            },
+                            Level::Info => {
+                                ((0.25, 0.75, 0.25, 1.0), im_str!("[INF]"))
+                            },
+                            Level::Debug => {
+                                ((0.5, 0.5, 0.75, 1.0), im_str!("[DBG]"))
+                            },
+                            Level::Trace => {
+                                ((0.25, 0.25, 0.25, 1.0), im_str!("[TRC]"))
+                            },
                         };
                         ui.text_colored(color, level);
                         ui.same_line(0.0);
                         let msg = unsafe {
-                            ImStr::from_utf8_with_nul_unchecked(&internal.text[record.span.clone()])
+                            ImStr::from_utf8_with_nul_unchecked(
+                                &internal.text[record.span.clone()],
+                            )
                         };
                         ui.text_wrapped(&msg);
                     }

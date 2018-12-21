@@ -1,4 +1,9 @@
-use crate::graphics::{select_memory_type, DrawContext, Graphics, GLOBAL_UBO_SIZE};
+use crate::graphics::{
+    select_memory_type,
+    DrawContext,
+    Graphics,
+    GLOBAL_UBO_SIZE,
+};
 use gfx_hal::{
     buffer::{Access, Usage},
     command::BufferCopy,
@@ -6,12 +11,31 @@ use gfx_hal::{
     memory::{Barrier, Dependencies, Properties},
     pass::Subpass,
     pso::{
-        AttributeDesc, BlendState, ColorBlendDesc, ColorMask, Descriptor,
-        DescriptorSetLayoutBinding, DescriptorSetWrite, DescriptorType, Element, EntryPoint, Face,
-        GraphicsPipelineDesc, GraphicsShaderSet, PipelineStage, Rasterizer, ShaderStageFlags,
-        Specialization, VertexBufferDesc, Viewport,
+        AttributeDesc,
+        BlendState,
+        ColorBlendDesc,
+        ColorMask,
+        Descriptor,
+        DescriptorSetLayoutBinding,
+        DescriptorSetWrite,
+        DescriptorType,
+        Element,
+        EntryPoint,
+        Face,
+        GraphicsPipelineDesc,
+        GraphicsShaderSet,
+        PipelineStage,
+        Rasterizer,
+        ShaderStageFlags,
+        Specialization,
+        VertexBufferDesc,
+        Viewport,
     },
-    Backend, DescriptorPool, Device, Primitive, Submission,
+    Backend,
+    DescriptorPool,
+    Device,
+    Primitive,
+    Submission,
 };
 use nalgebra::Point2;
 use palette::LinSrgb;
@@ -123,9 +147,7 @@ fn create_pipeline<'a, B: Backend>(
     pipeline_desc.baked_states.viewport = Some(viewport.clone());
     pipeline_desc.baked_states.scissor = Some(viewport.rect);
 
-    device
-        .create_graphics_pipeline(&pipeline_desc, None)
-        .unwrap()
+    device.create_graphics_pipeline(&pipeline_desc, None).unwrap()
 }
 
 impl<B: Backend> CircleRenderer<B> {
@@ -136,7 +158,8 @@ impl<B: Backend> CircleRenderer<B> {
             .device
             .create_buffer(size, Usage::TRANSFER_DST | Usage::VERTEX)
             .unwrap();
-        let requirements = graphics.device.get_buffer_requirements(&vertex_buffer);
+        let requirements =
+            graphics.device.get_buffer_requirements(&vertex_buffer);
         let memory_type = select_memory_type(
             &graphics.memory_types,
             Some(requirements),
@@ -153,11 +176,10 @@ impl<B: Backend> CircleRenderer<B> {
             .unwrap();
 
         // Create staging buffer.
-        let staging_buffer = graphics
-            .device
-            .create_buffer(size, Usage::TRANSFER_SRC)
-            .unwrap();
-        let requirements = graphics.device.get_buffer_requirements(&staging_buffer);
+        let staging_buffer =
+            graphics.device.create_buffer(size, Usage::TRANSFER_SRC).unwrap();
+        let requirements =
+            graphics.device.get_buffer_requirements(&staging_buffer);
         let memory_type = select_memory_type(
             &graphics.memory_types,
             Some(requirements),
@@ -184,7 +206,8 @@ impl<B: Backend> CircleRenderer<B> {
         // Copy staging buffer to vertex buffer.
         // TODO: handle unified graphics/transfer queue differently.
         let submit = {
-            let mut cbuf = graphics.transfer_command_pool.acquire_command_buffer(false);
+            let mut cbuf =
+                graphics.transfer_command_pool.acquire_command_buffer(false);
 
             cbuf.copy_buffer(
                 &staging_buffer,
@@ -209,10 +232,7 @@ impl<B: Backend> CircleRenderer<B> {
             cbuf.finish()
         };
 
-        graphics
-            .device
-            .reset_fence(&graphics.transfer_fence)
-            .unwrap();
+        graphics.device.reset_fence(&graphics.transfer_fence).unwrap();
         let submission = Submission::new().submit(Some(submit));
         graphics
             .queue_groups
@@ -221,11 +241,17 @@ impl<B: Backend> CircleRenderer<B> {
 
         // Load shaders.
         let vs_module = {
-            let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/shaders/circle.vert.spirv"));
+            let spirv = include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/shaders/circle.vert.spirv"
+            ));
             graphics.device.create_shader_module(spirv).unwrap()
         };
         let fs_module = {
-            let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/shaders/circle.frag.spirv"));
+            let spirv = include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/shaders/circle.frag.spirv"
+            ));
             graphics.device.create_shader_module(spirv).unwrap()
         };
 
@@ -278,10 +304,7 @@ impl<B: Backend> CircleRenderer<B> {
         // When transfer is finished, delete the staging buffers.
         // TODO: possibly need a pipeline barrier while drawing?
         // not sure it really matters?
-        graphics
-            .device
-            .wait_for_fence(&graphics.transfer_fence, !0)
-            .unwrap();
+        graphics.device.wait_for_fence(&graphics.transfer_fence, !0).unwrap();
         graphics.device.destroy_buffer(staging_buffer);
         graphics.device.free_memory(staging_memory);
 
@@ -297,7 +320,11 @@ impl<B: Backend> CircleRenderer<B> {
         }
     }
 
-    pub fn draw<I: IntoIterator<Item = Circle>>(&mut self, ctx: &mut DrawContext<B>, circles: I) {
+    pub fn draw<I: IntoIterator<Item = Circle>>(
+        &mut self,
+        ctx: &mut DrawContext<B>,
+        circles: I,
+    ) {
         if ctx.update_viewport {
             let pipeline = create_pipeline::<B>(
                 ctx.device,
@@ -332,7 +359,8 @@ impl<B: Backend> CircleRenderer<B> {
                 circle.color.blue,
                 1.0,
             ];
-            let push_constants: [u32; 8] = unsafe { mem::transmute(push_constants) };
+            let push_constants: [u32; 8] =
+                unsafe { mem::transmute(push_constants) };
             ctx.encoder.push_graphics_constants(
                 &self.pipeline_layout,
                 ShaderStageFlags::GRAPHICS,
@@ -347,9 +375,7 @@ impl<B: Backend> CircleRenderer<B> {
         graphics.device.wait_idle().unwrap();
         graphics.device.destroy_buffer(self.vertex_buffer);
         graphics.device.free_memory(self.vbo_memory);
-        graphics
-            .device
-            .destroy_pipeline_layout(self.pipeline_layout);
+        graphics.device.destroy_pipeline_layout(self.pipeline_layout);
         graphics.device.destroy_graphics_pipeline(self.pipeline);
         graphics.device.destroy_shader_module(self.vs_module);
         graphics.device.destroy_shader_module(self.fs_module);
