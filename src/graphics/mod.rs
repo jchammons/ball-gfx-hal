@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use gfx_hal::{
     buffer,
-    command::{ClearColor, ClearValue, Primary, RenderPassInlineEncoder},
+    command::{ClearColor, ClearValue, OneShot, RenderPassInlineEncoder},
     format::{Aspects, ChannelType, Format, Swizzle},
     image::{self, Layout, SubresourceRange, ViewKind},
     memory::{Barrier, Dependencies, Properties, Requirements},
@@ -16,6 +16,7 @@ use gfx_hal::{
     },
     pool::CommandPoolCreateFlags,
     pso::{DescriptorRangeDesc, DescriptorType, PipelineStage, Rect, Viewport},
+    window::CompositeAlpha,
     Adapter,
     Backbuffer,
     Backend,
@@ -40,6 +41,7 @@ use gfx_hal::{
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
 use log::{error, info};
+use smallvec::SmallVec;
 use std::mem;
 use take_mut;
 
@@ -110,7 +112,7 @@ pub struct Graphics<B: Backend> {
 pub struct DrawContext<'a, 'b, 'c, B: Backend> {
     device: &'c B::Device,
     render_pass: &'c B::RenderPass,
-    encoder: &'a mut RenderPassInlineEncoder<'b, B, Primary>,
+    encoder: &'a mut RenderPassInlineEncoder<'b, B>,
     viewport: &'c Viewport,
     update_viewport: bool,
 }
@@ -167,10 +169,32 @@ pub fn select_memory_type<I: IntoIterator<Item = Requirements>>(
     memory_types
         .iter()
         .enumerate()
-        .find(|(id, mem)| {
+        .position(|(id, mem)| {
             type_mask & (1u64 << id) != 0 && mem.properties.contains(properties)
         })
-        .map(|(id, _)| MemoryTypeId(id))
+        .map(|id| id.into())
+}
+
+/// Creates a buffer and binds memory to it.
+///
+/// Returns the buffer, bound memory, and the allocated buffer size.
+pub unsafe fn create_buffer<B: Backend>(
+    device: &B::Device,
+    memory_types: &[MemoryType],
+    properties: Properties,
+    usage: buffer::Usage,
+    size: u64,
+) -> (B::Buffer, B::Memory, u64) {
+    let mut buffer = device.create_buffer(size, usage).unwrap();
+    let requirements = device.get_buffer_requirements(&buffer);
+    let memory_type =
+        select_memory_type(&memory_types, Some(requirements), properties)
+            .expect("can't find memory type");
+    let memory =
+        device.allocate_memory(memory_type, requirements.size).unwrap();
+    device.bind_buffer_memory(&memory, 0, &mut buffer).unwrap();
+
+    (buffer, memory, requirements.size)
 }
 
 impl<B: Backend> QueueGroups<B> {
@@ -198,7 +222,7 @@ impl<B: Backend> QueueGroups<B> {
         &mut self,
     ) -> &mut CommandQueue<B, gfx_hal::Transfer> {
         match self {
-            QueueGroups::Single(graphics) => {
+            QueueGroups::Single(graphics) => unsafe {
                 if graphics.queues.len() > 1 {
                     graphics.queues[1].downgrade()
                 } else {
@@ -217,7 +241,6 @@ impl<B: Backend> QueueGroups<B> {
         &self,
         device: &B::Device,
         flags: CommandPoolCreateFlags,
-        max_buffers: usize,
     ) -> CommandPool<B, gfx_hal::Graphics> {
         let queue_group = match self {
             QueueGroups::Single(graphics) => graphics,
@@ -226,9 +249,7 @@ impl<B: Backend> QueueGroups<B> {
                 ..
             } => graphics,
         };
-        device
-            .create_command_pool_typed(queue_group, flags, max_buffers)
-            .unwrap()
+        unsafe { device.create_command_pool_typed(queue_group, flags).unwrap() }
     }
 
     /// Creates a command pool with transfer capability.
@@ -236,25 +257,21 @@ impl<B: Backend> QueueGroups<B> {
         &self,
         device: &B::Device,
         flags: CommandPoolCreateFlags,
-        max_buffers: usize,
     ) -> CommandPool<B, gfx_hal::Transfer> {
-        match self {
-            // Waiting on https://github.com/gfx-rs/gfx/issues/2476 to remove unsafe.
-            QueueGroups::Single(graphics) => unsafe {
-                CommandPool::new(
-                    device
-                        .create_command_pool(graphics.family(), flags)
-                        .unwrap(),
-                )
-            },
-            QueueGroups::Separate {
-                transfer,
-                ..
-            } => {
-                device
-                    .create_command_pool_typed(transfer, flags, max_buffers)
-                    .unwrap()
-            },
+        unsafe {
+            match self {
+                QueueGroups::Single(graphics) => {
+                    CommandPool::new(
+                        device
+                            .create_command_pool(graphics.family(), flags)
+                            .unwrap(),
+                    )
+                },
+                QueueGroups::Separate {
+                    transfer,
+                    ..
+                } => device.create_command_pool_typed(transfer, flags).unwrap(),
+            }
         }
     }
 }
@@ -285,10 +302,12 @@ impl<B: Backend> Graphics<B> {
                 (_, None) => continue, // No graphics queue.
                 (None, Some(graphics)) => {
                     // No transfer queue.
-                    let mut gpu = adapter
-                        .physical_device
-                        .open(&[(&graphics, &[1.0])])
-                        .unwrap();
+                    let mut gpu = unsafe {
+                        adapter
+                            .physical_device
+                            .open(&[(&graphics, &[1.0])])
+                            .unwrap()
+                    };
                     let queue_group = gpu
                         .queues
                         .take::<gfx_hal::Graphics>(graphics.id())
@@ -300,11 +319,14 @@ impl<B: Backend> Graphics<B> {
                     );
                 },
                 (Some(transfer), Some(graphics)) => {
-                    // Separate transfer and graphics queues.
-                    let mut gpu = adapter
-                        .physical_device
-                        .open(&[(&graphics, &[1.0]), (&transfer, &[0.0])])
-                        .unwrap();
+                    // Separate transfer and graphics
+                    // queues.
+                    let mut gpu = unsafe {
+                        adapter
+                            .physical_device
+                            .open(&[(&graphics, &[1.0]), (&transfer, &[0.0])])
+                            .unwrap()
+                    };
                     let graphics = gpu
                         .queues
                         .take::<gfx_hal::Graphics>(graphics.id())
@@ -333,31 +355,34 @@ impl<B: Backend> Graphics<B> {
             .create_transfer_command_pool(
                 &device,
                 CommandPoolCreateFlags::TRANSIENT,
-                16,
             );
 
         // Create global UBO
-        let global_ubo = device
-            .create_buffer(
-                GLOBAL_UBO_SIZE,
-                buffer::Usage::TRANSFER_DST | buffer::Usage::UNIFORM,
+        let (global_ubo, global_ubo_memory) = unsafe {
+            let mut global_ubo = device
+                .create_buffer(
+                    GLOBAL_UBO_SIZE,
+                    buffer::Usage::TRANSFER_DST | buffer::Usage::UNIFORM,
+                )
+                .unwrap();
+            let requirements = device.get_buffer_requirements(&global_ubo);
+            let memory_type = select_memory_type(
+                &memory_types,
+                Some(requirements),
+                Properties::DEVICE_LOCAL,
             )
-            .unwrap();
-        let requirements = device.get_buffer_requirements(&global_ubo);
-        let memory_type = select_memory_type(
-            &memory_types,
-            Some(requirements),
-            Properties::DEVICE_LOCAL,
-        )
-        .expect("can't find memory type for global uniform buffer");
-        let global_ubo_memory =
-            device.allocate_memory(memory_type, requirements.size).unwrap();
-        let global_ubo = device
-            .bind_buffer_memory(&global_ubo_memory, 0, global_ubo)
-            .unwrap();
+            .expect("can't find memory type for global uniform buffer");
+            let global_ubo_memory =
+                device.allocate_memory(memory_type, requirements.size).unwrap();
+            device
+                .bind_buffer_memory(&global_ubo_memory, 0, &mut global_ubo)
+                .unwrap();
+            (global_ubo, global_ubo_memory)
+        };
 
         // Determine image capabilities and color format
-        let (_, formats, _) = surface.compatibility(physical_device);
+        // TODO figure out what available present modes are
+        let (_, formats, ..) = surface.compatibility(physical_device);
         let color_format = formats.map_or(Format::Rgba8Unorm, |formats| {
             formats
                 .iter()
@@ -395,13 +420,15 @@ impl<B: Backend> Graphics<B> {
                         image::Access::COLOR_ATTACHMENT_WRITE),
             };
 
-            device
-                .create_render_pass(
-                    &[color_attachment],
-                    &[subpass],
-                    &[dependency],
-                )
-                .unwrap()
+            unsafe {
+                device
+                    .create_render_pass(
+                        &[color_attachment],
+                        &[subpass],
+                        &[dependency],
+                    )
+                    .unwrap()
+            }
         };
 
         let imgui_renderer = imgui_gfx_hal::Renderer::new(
@@ -417,15 +444,17 @@ impl<B: Backend> Graphics<B> {
         .unwrap();
 
         // TODO: figure out pool size
-        let descriptor_pool = device
-            .create_descriptor_pool(
-                1,
-                &[DescriptorRangeDesc {
-                    ty: DescriptorType::UniformBuffer,
-                    count: 1,
-                }],
-            )
-            .unwrap();
+        let descriptor_pool = unsafe {
+            device
+                .create_descriptor_pool(
+                    1,
+                    &[DescriptorRangeDesc {
+                        ty: DescriptorType::UniformBuffer,
+                        count: 1,
+                    }],
+                )
+                .unwrap()
+        };
 
         // TODO: this is ugly!
         let global_ubo_update_semaphore = device.create_semaphore().unwrap();
@@ -443,7 +472,6 @@ impl<B: Backend> Graphics<B> {
                 queue_groups.create_graphics_command_pool(
                     &device,
                     CommandPoolCreateFlags::TRANSIENT,
-                    4,
                 )
             })
             .collect();
@@ -498,7 +526,7 @@ impl<B: Backend> Graphics<B> {
     /// `draw_frame` is undesirable.
     pub fn wait_for_frame(&self) {
         let frame_fence = &self.frame_fences[self.current_frame];
-        self.device.wait_for_fence(frame_fence, !0).unwrap();
+        unsafe { self.device.wait_for_fence(frame_fence, !0).unwrap() };
     }
 
     pub fn draw_frame<F: FnOnce(DrawContext<B>)>(
@@ -514,16 +542,20 @@ impl<B: Backend> Graphics<B> {
             &self.frame_finished_semaphores[self.current_frame];
 
         // Make sure there are no more than MAX_FRAMES frames in flight.
-        // TODO: somehow check that `wait_for_frame` has already been run.
-        self.device.wait_for_fence(frame_fence, !0).unwrap();
-        self.device.reset_fence(frame_fence).unwrap();
-        self.frame_command_pools[self.current_frame].reset();
+        // TODO: somehow check that `wait_for_frame` has already been
+        // run.
+        unsafe {
+            self.device.wait_for_fence(frame_fence, !0).unwrap();
+            self.device.reset_fence(frame_fence).unwrap();
+            self.frame_command_pools[self.current_frame].reset();
+        }
 
         if self.swapchain_update || self.viewport_update {
             let old_viewport = self.swapchain_state.viewport.clone();
 
             {
-                // TODO: this is dumb and bad and I want partial borrowing
+                // TODO: this is dumb and bad and I want partial
+                // borrowing
                 let &mut Graphics {
                     ref device,
                     ref adapter,
@@ -557,9 +589,11 @@ impl<B: Backend> Graphics<B> {
         if ubo_update {
             // Update the global UBO.
             // self.transfer_command_pool.reset();
-            let submit = {
-                let mut cbuf =
-                    self.transfer_command_pool.acquire_command_buffer(false);
+            let mut cmd_buffer =
+                self.transfer_command_pool.acquire_command_buffer::<OneShot>();
+
+            unsafe {
+                cmd_buffer.begin();
 
                 let (width, height) = (
                     f32::from(self.swapchain_state.viewport.rect.w),
@@ -573,55 +607,67 @@ impl<B: Backend> Graphics<B> {
                 let data = GlobalUbo {
                     scale,
                 };
-                let data: [u8; 4 * 2] = unsafe { mem::transmute(data) };
+                // Double unsafe!
+                let data: [u8; 4 * 2] = mem::transmute(data);
 
-                cbuf.update_buffer(&self.global_ubo, 0, &data);
-                let barrier = Barrier::Buffer {
-                    states: buffer::Access::TRANSFER_WRITE..
-                        buffer::Access::empty(),
-                    target: &self.global_ubo,
-                };
-                cbuf.pipeline_barrier(
-                    PipelineStage::TRANSFER..PipelineStage::BOTTOM_OF_PIPE,
+                cmd_buffer.update_buffer(&self.global_ubo, 0, &data);
+                let barrier = Barrier::whole_buffer(
+                    &self.global_ubo,
+                    buffer::Access::TRANSFER_WRITE..
+                        buffer::Access::CONSTANT_BUFFER_READ,
+                );
+                cmd_buffer.pipeline_barrier(
+                    PipelineStage::TRANSFER..PipelineStage::VERTEX_SHADER,
                     Dependencies::empty(),
                     &[barrier],
                 );
 
-                cbuf.finish()
-            };
-            let submission = Submission::new()
-                .signal(&[&self.global_ubo_update_semaphore])
-                .submit(Some(submit));
-            self.queue_groups.transfer_queue().submit(submission, None);
+                cmd_buffer.finish();
+
+                let submission = Submission {
+                    command_buffers: Some(&cmd_buffer),
+                    wait_semaphores: None,
+                    signal_semaphores: Some(&self.global_ubo_update_semaphore),
+                };
+                self.queue_groups.transfer_queue().submit(submission, None);
+            }
         }
 
         // Get swapchain index
-        let frame_index: SwapImageIndex = self
-            .swapchain_state
-            .swapchain
-            .acquire_image(!0, FrameSync::Semaphore(image_available_semaphore))
-            .unwrap();
+        let frame_index: SwapImageIndex = unsafe {
+            self.swapchain_state
+                .swapchain
+                .acquire_image(
+                    !0,
+                    FrameSync::Semaphore(image_available_semaphore),
+                )
+                .unwrap()
+        };
 
-        let submit = {
-            let mut cbuf = self.frame_command_pools[self.current_frame]
-                .acquire_command_buffer(false);
+        let mut cmd_buffer = self.frame_command_pools[self.current_frame]
+            .acquire_command_buffer::<OneShot>();
+
+        unsafe {
+            cmd_buffer.begin();
+
+            // Insert a barrier if the ubo was updated.
+            if ubo_update {
+                let barrier = Barrier::whole_buffer(
+                    &self.global_ubo,
+                    buffer::Access::empty()..
+                        buffer::Access::CONSTANT_BUFFER_READ,
+                );
+                cmd_buffer.pipeline_barrier(
+                    PipelineStage::TRANSFER..PipelineStage::VERTEX_SHADER,
+                    Dependencies::empty(),
+                    &[barrier],
+                );
+            }
+
             {
-                if ubo_update {
-                    let barrier = Barrier::Buffer {
-                        states: buffer::Access::empty()..
-                            buffer::Access::SHADER_READ,
-                        target: &self.global_ubo,
-                    };
-                    cbuf.pipeline_barrier(
-                        PipelineStage::TOP_OF_PIPE..
-                            PipelineStage::VERTEX_SHADER,
-                        Dependencies::empty(),
-                        &[barrier],
-                    );
-                }
-
-                // TODO: multithread this, and possibly cache command buffers
-                let mut encoder = cbuf.begin_render_pass_inline(
+                // TODO: multithread this, and possibly cache command
+                // buffers
+                let mut encoder = cmd_buffer.begin_render_pass_inline(
                     &self.render_pass,
                     &self.swapchain_state.framebuffers[frame_index as usize],
                     self.swapchain_state.viewport.rect,
@@ -651,45 +697,49 @@ impl<B: Backend> Graphics<B> {
                     )
                     .unwrap();
             }
-            cbuf.finish()
-        };
 
-        let mut submission = Submission::new()
-            .wait_on(&[(
+            cmd_buffer.finish();
+
+            let mut wait_semaphores = SmallVec::<[_; 2]>::new();
+            wait_semaphores.push((
                 image_available_semaphore,
                 PipelineStage::COLOR_ATTACHMENT_OUTPUT,
-            )])
-            .signal(&[frame_finished_semaphore])
-            .submit(Some(submit));
-        if ubo_update {
-            submission = submission.wait_on(&[(
-                &self.global_ubo_update_semaphore,
-                PipelineStage::VERTEX_SHADER,
-            )])
-        }
-        self.queue_groups
-            .graphics_queue()
-            .submit(submission, Some(frame_fence));
+            ));
+            if ubo_update {
+                wait_semaphores.push((
+                    &self.global_ubo_update_semaphore,
+                    PipelineStage::VERTEX_SHADER,
+                ));
+            }
+            let submission = Submission {
+                command_buffers: Some(&cmd_buffer),
+                wait_semaphores,
+                signal_semaphores: Some(frame_finished_semaphore),
+            };
+            self.queue_groups
+                .graphics_queue()
+                .submit(submission, Some(frame_fence));
 
-        self.current_frame = (self.current_frame + 1) % MAX_FRAMES;
-        self.swapchain_update = false;
-        self.viewport_update = false;
-        self.first_frame = false;
+            self.current_frame = (self.current_frame + 1) % MAX_FRAMES;
+            self.swapchain_update = false;
+            self.viewport_update = false;
+            self.first_frame = false;
 
-        if self
-            .swapchain_state
-            .swapchain
-            .present(
-                &mut self.queue_groups.graphics_queue(),
-                frame_index,
-                [frame_finished_semaphore].iter().cloned(),
-            )
-            .is_err()
-        {
-            error!("error occurred while presenting swapchain");
-            // TODO: detect if it's a bad swapchain error or not
-            self.swapchain_update = true;
-            return Err(());
+            if self
+                .swapchain_state
+                .swapchain
+                .present(
+                    &mut self.queue_groups.graphics_queue(),
+                    frame_index,
+                    [frame_finished_semaphore].iter().cloned(),
+                )
+                .is_err()
+            {
+                error!("error occurred while presenting swapchain");
+                // TODO: detect if it's a bad swapchain error or not
+                self.swapchain_update = true;
+                return Err(());
+            }
         }
 
         Ok(())
@@ -715,26 +765,28 @@ impl<B: Backend> Graphics<B> {
         } = self;
 
         device.wait_idle().unwrap();
-        device.destroy_fence(transfer_fence);
-        swapchain_state.destroy(&device);
-        device.destroy_command_pool(transfer_command_pool.into_raw());
-        for command_pool in frame_command_pools.into_iter() {
-            device.destroy_command_pool(command_pool.into_raw());
+        unsafe {
+            device.destroy_fence(transfer_fence);
+            swapchain_state.destroy(&device);
+            device.destroy_command_pool(transfer_command_pool.into_raw());
+            for command_pool in frame_command_pools.into_iter() {
+                device.destroy_command_pool(command_pool.into_raw());
+            }
+            for fence in frame_fences.into_iter() {
+                device.destroy_fence(fence);
+            }
+            device.destroy_semaphore(global_ubo_update_semaphore);
+            for semaphore in frame_finished_semaphores.into_iter() {
+                device.destroy_semaphore(semaphore);
+            }
+            for semaphore in image_available_semaphores.into_iter() {
+                device.destroy_semaphore(semaphore);
+            }
+            device.destroy_descriptor_pool(descriptor_pool);
+            device.destroy_render_pass(render_pass);
+            device.destroy_buffer(global_ubo);
+            device.free_memory(global_ubo_memory);
         }
-        for fence in frame_fences.into_iter() {
-            device.destroy_fence(fence);
-        }
-        device.destroy_semaphore(global_ubo_update_semaphore);
-        for semaphore in frame_finished_semaphores.into_iter() {
-            device.destroy_semaphore(semaphore);
-        }
-        for semaphore in image_available_semaphores.into_iter() {
-            device.destroy_semaphore(semaphore);
-        }
-        device.destroy_descriptor_pool(descriptor_pool);
-        device.destroy_render_pass(render_pass);
-        device.destroy_buffer(global_ubo);
-        device.free_memory(global_ubo_memory);
         imgui_renderer.destroy(&device);
     }
 }
@@ -754,6 +806,7 @@ impl<B: Backend> SwapchainState<B> {
         assert!(caps.image_count.contains(&(MAX_FRAMES as u32)));
         let swapchain_config = SwapchainConfig {
             present_mode,
+            composite_alpha: CompositeAlpha::Opaque,
             image_count: MAX_FRAMES as u32,
             ..SwapchainConfig::from_caps(&caps, color_format, extent)
         };
@@ -764,17 +817,20 @@ impl<B: Backend> SwapchainState<B> {
 
         // Destroy the old buffers, but keep the swapchain itself around
         let old = old.map(|old| {
-            for framebuffer in old.framebuffers {
-                device.destroy_framebuffer(framebuffer);
-            }
-            for image_view in old.frame_views {
-                device.destroy_image_view(image_view);
+            unsafe {
+                for framebuffer in old.framebuffers {
+                    device.destroy_framebuffer(framebuffer);
+                }
+                for image_view in old.frame_views {
+                    device.destroy_image_view(image_view);
+                }
             }
             old.swapchain
         });
 
-        let (swapchain, backbuffer) =
-            device.create_swapchain(surface, swapchain_config, old).unwrap();
+        let (swapchain, backbuffer) = unsafe {
+            device.create_swapchain(surface, swapchain_config, old).unwrap()
+        };
 
         let (frame_views, framebuffers) = match backbuffer {
             Backbuffer::Images(images) => {
@@ -786,7 +842,7 @@ impl<B: Backend> SwapchainState<B> {
 
                 let image_views = images
                     .iter()
-                    .map(|image| {
+                    .map(|image| unsafe {
                         device
                             .create_image_view(
                                 image,
@@ -801,7 +857,7 @@ impl<B: Backend> SwapchainState<B> {
 
                 let fbos = image_views
                     .iter()
-                    .map(|image_view| {
+                    .map(|image_view| unsafe {
                         device
                             .create_framebuffer(
                                 &render_pass,
@@ -836,12 +892,14 @@ impl<B: Backend> SwapchainState<B> {
     }
 
     fn destroy(self, device: &B::Device) {
-        device.destroy_swapchain(self.swapchain);
-        for framebuffer in self.framebuffers {
-            device.destroy_framebuffer(framebuffer);
-        }
-        for image_view in self.frame_views {
-            device.destroy_image_view(image_view);
+        unsafe {
+            device.destroy_swapchain(self.swapchain);
+            for framebuffer in self.framebuffers {
+                device.destroy_framebuffer(framebuffer);
+            }
+            for image_view in self.frame_views {
+                device.destroy_image_view(image_view);
+            }
         }
     }
 }
