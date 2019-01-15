@@ -126,14 +126,13 @@ impl InputBuffer {
     /// Returns true if any new packets were acknowledged.
     pub fn packet_ack(&mut self, sequence: u32) -> bool {
         // Find the latest packet that is at least as old as sequence.
-        let (idx, &(_, end)) = match self
+        let latest = self
             .sent_packets
             .iter()
             .enumerate()
-            // Search from the end, to find the most recent instead of
-            // the oldest.
-            .rfind(|(_, &(sent_sequence, _))| sent_sequence <= sequence)
-        {
+            .rfind(|(_, &(sent_sequence, _))| sent_sequence <= sequence);
+
+        let (idx, &(_, end)) = match latest {
             Some(sequence) => sequence,
             None => return false,
         };

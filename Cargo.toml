@@ -8,10 +8,9 @@ edition = "2018"
 default = ["renderdoc"]
 
 [dependencies]
-gfx-hal = { git = "https://github.com/gfx-rs/gfx", rev = "a9986822ec6f679aff607b383126489e026d70f6" }
-gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx", rev = "a9986822ec6f679aff607b383126489e026d70f6" }
-imgui-gfx-hal = { git = "https://git.chronicembetterment.org/git/benjamin/imgui-gfx-hal" }
-#imgui-gfx-hal = { path = "../imgui-gfx-hal" }
+gfx-hal = "0.1.0"
+gfx-backend-vulkan = "0.1.0"
+imgui-gfx-hal = "0.1.0"
 imgui = "0.0.21"
 winit = "0.18.0"
 imgui-winit = "0.1.2"
@@ -43,7 +42,3 @@ either = "1.5.0"
 [build-dependencies]
 shaderc = "0.3.12"
 walkdir = "2.2.7"
-
-[patch."https://github.com/gfx-rs/gfx"]
-gfx-hal = { git = "https://github.com/Benjamin-L/gfx" }
-gfx-backend-vulkan = { git = "https://github.com/Benjamin-L/gfx" }

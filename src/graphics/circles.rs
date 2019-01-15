@@ -1,12 +1,7 @@
-use crate::graphics::{
-    select_memory_type,
-    DrawContext,
-    Graphics,
-    GLOBAL_UBO_SIZE,
-};
+use crate::graphics::{create_buffer, DrawContext, Graphics, GLOBAL_UBO_SIZE};
 use gfx_hal::{
     buffer::{Access, Usage},
-    command::BufferCopy,
+    command::{BufferCopy, OneShot},
     format::Format,
     memory::{Barrier, Dependencies, Properties},
     pass::Subpass,
@@ -35,7 +30,6 @@ use gfx_hal::{
     DescriptorPool,
     Device,
     Primitive,
-    Submission,
 };
 use nalgebra::Point2;
 use palette::LinSrgb;
@@ -71,7 +65,7 @@ const VERTS: [Vertex; 4] = [
 
 pub struct CircleRenderer<B: Backend> {
     vertex_buffer: B::Buffer,
-    vbo_memory: B::Memory,
+    vertex_memory: B::Memory,
     pipeline_layout: B::PipelineLayout,
     descriptor_set_layout: B::DescriptorSetLayout,
     global_ubo_descriptor_set: B::DescriptorSet,
@@ -147,69 +141,53 @@ fn create_pipeline<'a, B: Backend>(
     pipeline_desc.baked_states.viewport = Some(viewport.clone());
     pipeline_desc.baked_states.scissor = Some(viewport.rect);
 
-    device.create_graphics_pipeline(&pipeline_desc, None).unwrap()
+    unsafe { device.create_graphics_pipeline(&pipeline_desc, None).unwrap() }
 }
 
 impl<B: Backend> CircleRenderer<B> {
     pub fn new(graphics: &mut Graphics<B>) -> CircleRenderer<B> {
         // Create vertex buffer.
         let size = 4 * mem::size_of::<Vertex>() as u64;
-        let vertex_buffer = graphics
-            .device
-            .create_buffer(size, Usage::TRANSFER_DST | Usage::VERTEX)
-            .unwrap();
-        let requirements =
-            graphics.device.get_buffer_requirements(&vertex_buffer);
-        let memory_type = select_memory_type(
-            &graphics.memory_types,
-            Some(requirements),
-            Properties::DEVICE_LOCAL,
-        )
-        .expect("can't find memory type for vertex buffer");
-        let vbo_memory = graphics
-            .device
-            .allocate_memory(memory_type, requirements.size)
-            .unwrap();
-        let vertex_buffer = graphics
-            .device
-            .bind_buffer_memory(&vbo_memory, 0, vertex_buffer)
-            .unwrap();
+        let (vertex_buffer, vertex_memory, _) = unsafe {
+            create_buffer::<B>(
+                &graphics.device,
+                &graphics.memory_types,
+                Properties::DEVICE_LOCAL,
+                Usage::TRANSFER_DST | Usage::VERTEX,
+                size,
+            )
+        };
 
         // Create staging buffer.
-        let staging_buffer =
-            graphics.device.create_buffer(size, Usage::TRANSFER_SRC).unwrap();
-        let requirements =
-            graphics.device.get_buffer_requirements(&staging_buffer);
-        let memory_type = select_memory_type(
-            &graphics.memory_types,
-            Some(requirements),
-            Properties::CPU_VISIBLE,
-        )
-        .expect("can't find memory type for vertex staging buffer");
-        let staging_memory = graphics
-            .device
-            .allocate_memory(memory_type, requirements.size)
-            .unwrap();
-        let staging_buffer = graphics
-            .device
-            .bind_buffer_memory(&staging_memory, 0, staging_buffer)
-            .unwrap();
+        let (staging_buffer, staging_memory, _) = unsafe {
+            create_buffer::<B>(
+                &graphics.device,
+                &graphics.memory_types,
+                Properties::CPU_VISIBLE,
+                Usage::TRANSFER_SRC,
+                size,
+            )
+        };
 
         // Copy vertices to the staging buffer.
-        let mut map = graphics
-            .device
-            .acquire_mapping_writer(&staging_memory, 0..size)
-            .unwrap();
-        map.clone_from_slice(&VERTS);
-        graphics.device.release_mapping_writer(map).unwrap();
+        unsafe {
+            let mut map = graphics
+                .device
+                .acquire_mapping_writer(&staging_memory, 0..size)
+                .unwrap();
+            map.clone_from_slice(&VERTS);
+            graphics.device.release_mapping_writer(map).unwrap();
+        }
 
         // Copy staging buffer to vertex buffer.
         // TODO: handle unified graphics/transfer queue differently.
-        let submit = {
-            let mut cbuf =
-                graphics.transfer_command_pool.acquire_command_buffer(false);
+        let mut cmd_buffer =
+            graphics.transfer_command_pool.acquire_command_buffer::<OneShot>();
 
-            cbuf.copy_buffer(
+        unsafe {
+            cmd_buffer.begin();
+
+            cmd_buffer.copy_buffer(
                 &staging_buffer,
                 &vertex_buffer,
                 &[BufferCopy {
@@ -219,25 +197,24 @@ impl<B: Backend> CircleRenderer<B> {
                 }],
             );
 
-            let barrier = Barrier::Buffer {
-                states: Access::TRANSFER_WRITE..Access::empty(),
-                target: &vertex_buffer,
-            };
-            cbuf.pipeline_barrier(
-                PipelineStage::TRANSFER..PipelineStage::BOTTOM_OF_PIPE,
+            let barrier = Barrier::whole_buffer(
+                &vertex_buffer,
+                Access::TRANSFER_WRITE..Access::VERTEX_BUFFER_READ,
+            );
+            cmd_buffer.pipeline_barrier(
+                PipelineStage::TRANSFER..PipelineStage::VERTEX_INPUT,
                 Dependencies::empty(),
                 &[barrier],
             );
 
-            cbuf.finish()
-        };
+            cmd_buffer.finish();
 
-        graphics.device.reset_fence(&graphics.transfer_fence).unwrap();
-        let submission = Submission::new().submit(Some(submit));
-        graphics
-            .queue_groups
-            .transfer_queue()
-            .submit(submission, Some(&graphics.transfer_fence));
+            graphics.device.reset_fence(&graphics.transfer_fence).unwrap();
+            graphics.queue_groups.transfer_queue().submit_nosemaphores(
+                Some(&cmd_buffer),
+                Some(&graphics.transfer_fence),
+            );
+        }
 
         // Load shaders.
         let vs_module = {
@@ -245,14 +222,14 @@ impl<B: Backend> CircleRenderer<B> {
                 env!("OUT_DIR"),
                 "/shaders/circle.vert.spirv"
             ));
-            graphics.device.create_shader_module(spirv).unwrap()
+            unsafe { graphics.device.create_shader_module(spirv).unwrap() }
         };
         let fs_module = {
             let spirv = include_bytes!(concat!(
                 env!("OUT_DIR"),
                 "/shaders/circle.frag.spirv"
             ));
-            graphics.device.create_shader_module(spirv).unwrap()
+            unsafe { graphics.device.create_shader_module(spirv).unwrap() }
         };
 
         // Create descriptor set layout and descriptor set for global
@@ -265,14 +242,18 @@ impl<B: Backend> CircleRenderer<B> {
             stage_flags: ShaderStageFlags::ALL,
             immutable_samplers: false,
         };
-        let descriptor_set_layout = graphics
-            .device
-            .create_descriptor_set_layout(&[global_ubo_layout_binding], &[])
-            .unwrap();
-        let global_ubo_descriptor_set = graphics
-            .descriptor_pool
-            .allocate_set(&descriptor_set_layout)
-            .unwrap();
+        let descriptor_set_layout = unsafe {
+            graphics
+                .device
+                .create_descriptor_set_layout(&[global_ubo_layout_binding], &[])
+                .unwrap()
+        };
+        let global_ubo_descriptor_set = unsafe {
+            graphics
+                .descriptor_pool
+                .allocate_set(&descriptor_set_layout)
+                .unwrap()
+        };
         let write = DescriptorSetWrite {
             set: &global_ubo_descriptor_set,
             binding: 0,
@@ -282,16 +263,20 @@ impl<B: Backend> CircleRenderer<B> {
                 Some(0)..Some(GLOBAL_UBO_SIZE),
             )],
         };
-        graphics.device.write_descriptor_sets(Some(write));
+        unsafe {
+            graphics.device.write_descriptor_sets(Some(write));
+        }
 
         // Create pipeline for circle rendering.
-        let pipeline_layout = graphics
-            .device
-            .create_pipeline_layout(
-                Some(&descriptor_set_layout),
-                &[(ShaderStageFlags::GRAPHICS, 0..8)],
-            )
-            .unwrap();
+        let pipeline_layout = unsafe {
+            graphics
+                .device
+                .create_pipeline_layout(
+                    Some(&descriptor_set_layout),
+                    &[(ShaderStageFlags::GRAPHICS, 0..8)],
+                )
+                .unwrap()
+        };
         let pipeline = create_pipeline::<B>(
             &graphics.device,
             &vs_module,
@@ -302,15 +287,18 @@ impl<B: Backend> CircleRenderer<B> {
         );
 
         // When transfer is finished, delete the staging buffers.
-        // TODO: possibly need a pipeline barrier while drawing?
-        // not sure it really matters?
-        graphics.device.wait_for_fence(&graphics.transfer_fence, !0).unwrap();
-        graphics.device.destroy_buffer(staging_buffer);
-        graphics.device.free_memory(staging_memory);
+        unsafe {
+            graphics
+                .device
+                .wait_for_fence(&graphics.transfer_fence, !0)
+                .unwrap();
+            graphics.device.destroy_buffer(staging_buffer);
+            graphics.device.free_memory(staging_memory);
+        }
 
         CircleRenderer {
             vertex_buffer,
-            vbo_memory,
+            vertex_memory,
             pipeline_layout,
             descriptor_set_layout,
             global_ubo_descriptor_set,
@@ -335,52 +323,59 @@ impl<B: Backend> CircleRenderer<B> {
                 &ctx.viewport,
             );
             let pipeline = mem::replace(&mut self.pipeline, pipeline);
-            ctx.device.destroy_graphics_pipeline(pipeline);
+            unsafe {
+                ctx.device.destroy_graphics_pipeline(pipeline);
+            }
         }
 
         // TODO: re-use command buffers
-        ctx.encoder
-            .bind_vertex_buffers(0, [(&self.vertex_buffer, 0)].iter().cloned());
-        ctx.encoder.bind_graphics_pipeline(&self.pipeline);
-        ctx.encoder.bind_graphics_descriptor_sets(
-            &self.pipeline_layout,
-            0,
-            Some(&self.global_ubo_descriptor_set),
-            None as Option<u32>,
-        );
-        for circle in circles {
-            let push_constants = [
-                circle.radius,
-                0.0, // padding
-                circle.center.x,
-                circle.center.y,
-                circle.color.red,
-                circle.color.green,
-                circle.color.blue,
-                1.0,
-            ];
-            let push_constants: [u32; 8] =
-                unsafe { mem::transmute(push_constants) };
-            ctx.encoder.push_graphics_constants(
-                &self.pipeline_layout,
-                ShaderStageFlags::GRAPHICS,
+        unsafe {
+            ctx.encoder.bind_vertex_buffers(
                 0,
-                &push_constants,
+                [(&self.vertex_buffer, 0)].iter().cloned(),
             );
-            ctx.encoder.draw(0..4, 0..1);
+            ctx.encoder.bind_graphics_pipeline(&self.pipeline);
+            ctx.encoder.bind_graphics_descriptor_sets(
+                &self.pipeline_layout,
+                0,
+                Some(&self.global_ubo_descriptor_set),
+                None as Option<u32>,
+            );
+            for circle in circles {
+                let push_constants = [
+                    circle.radius,
+                    0.0, // padding
+                    circle.center.x,
+                    circle.center.y,
+                    circle.color.red,
+                    circle.color.green,
+                    circle.color.blue,
+                    1.0,
+                ];
+                let push_constants: [u32; 8] = mem::transmute(push_constants);
+                ctx.encoder.push_graphics_constants(
+                    &self.pipeline_layout,
+                    ShaderStageFlags::GRAPHICS,
+                    0,
+                    &push_constants,
+                );
+                ctx.encoder.draw(0..4, 0..1);
+            }
         }
     }
 
     pub fn destroy(self, graphics: &mut Graphics<B>) {
         graphics.device.wait_idle().unwrap();
-        graphics.device.destroy_buffer(self.vertex_buffer);
-        graphics.device.free_memory(self.vbo_memory);
-        graphics.device.destroy_pipeline_layout(self.pipeline_layout);
-        graphics.device.destroy_graphics_pipeline(self.pipeline);
-        graphics.device.destroy_shader_module(self.vs_module);
-        graphics.device.destroy_shader_module(self.fs_module);
-        graphics
-            .device
-            .destroy_descriptor_set_layout(self.descriptor_set_layout);
+        unsafe {
+            graphics.device.destroy_buffer(self.vertex_buffer);
+            graphics.device.free_memory(self.vertex_memory);
+            graphics.device.destroy_pipeline_layout(self.pipeline_layout);
+            graphics.device.destroy_graphics_pipeline(self.pipeline);
+            graphics.device.destroy_shader_module(self.vs_module);
+            graphics.device.destroy_shader_module(self.fs_module);
+            graphics
+                .device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout);
+        }
     }
 }
