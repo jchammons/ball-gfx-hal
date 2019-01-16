@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use gfx_hal::{
     buffer,
-    command::{ClearColor, ClearValue, OneShot, RenderPassInlineEncoder},
+    command::{ClearColor, ClearValue, OneShot, RenderPassInlineEncoder, CommandBuffer, Primary},
     format::{Aspects, ChannelType, Format, Swizzle},
     image::{self, Layout, SubresourceRange, ViewKind},
     memory::{Barrier, Dependencies, Properties, Requirements},
@@ -41,7 +41,6 @@ use gfx_hal::{
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
 use log::{error, info};
-use smallvec::SmallVec;
 use std::mem;
 use take_mut;
 
@@ -89,7 +88,10 @@ pub struct Graphics<B: Backend> {
     queue_groups: QueueGroups<B>,
     transfer_command_pool: CommandPool<B, gfx_hal::Transfer>,
     frame_command_pools:
-        ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
+    ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
+    frame_cmd_buffers: ArrayVec<[CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>; MAX_FRAMES]>,
+    global_ubo_update_command_pool: CommandPool<B, gfx_hal::Graphics>,
+    global_ubo_update_cmd_buffer: CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>,
     swapchain_state: SwapchainState<B>,
     render_pass: B::RenderPass,
     global_ubo: B::Buffer,
@@ -97,7 +99,7 @@ pub struct Graphics<B: Backend> {
     descriptor_pool: B::DescriptorPool,
     image_available_semaphores: ArrayVec<[B::Semaphore; MAX_FRAMES]>,
     frame_finished_semaphores: ArrayVec<[B::Semaphore; MAX_FRAMES]>,
-    global_ubo_update_semaphore: B::Semaphore,
+    global_ubo_update_fence: B::Fence,
     frame_fences: ArrayVec<[B::Fence; MAX_FRAMES]>,
     transfer_fence: B::Fence,
     imgui_renderer: imgui_gfx_hal::Renderer<B>,
@@ -457,7 +459,6 @@ impl<B: Backend> Graphics<B> {
         };
 
         // TODO: this is ugly!
-        let global_ubo_update_semaphore = device.create_semaphore().unwrap();
         let image_available_semaphores = (0..MAX_FRAMES)
             .map(|_| device.create_semaphore().unwrap())
             .collect();
@@ -467,14 +468,25 @@ impl<B: Backend> Graphics<B> {
         let frame_fences = (0..MAX_FRAMES)
             .map(|_| device.create_fence(true).unwrap())
             .collect();
-        let frame_command_pools = (0..MAX_FRAMES)
+        // Allocate a separate command pool for each frame, to allow
+        // resetting the corresponding command buffers individually.
+        let mut frame_command_pools: ArrayVec<[_; 2]> = (0..MAX_FRAMES)
             .map(|_| {
                 queue_groups.create_graphics_command_pool(
                     &device,
-                    CommandPoolCreateFlags::TRANSIENT,
+                    CommandPoolCreateFlags::empty(),
                 )
             })
             .collect();
+        // Allocate a command buffer for each frame.
+        let frame_cmd_buffers = (0..MAX_FRAMES)
+            .map(|frame| {
+                frame_command_pools[frame].acquire_command_buffer::<OneShot>()
+            }).collect();
+
+        let mut global_ubo_update_command_pool = queue_groups.create_graphics_command_pool(&device, CommandPoolCreateFlags::empty());
+        let global_ubo_update_cmd_buffer = global_ubo_update_command_pool.acquire_command_buffer::<OneShot>();
+        let global_ubo_update_fence = device.create_fence(true).unwrap();
 
         let swapchain_state = SwapchainState::new(
             &device,
@@ -495,11 +507,14 @@ impl<B: Backend> Graphics<B> {
             transfer_command_pool,
             transfer_fence,
             frame_command_pools,
+            frame_cmd_buffers,
+            global_ubo_update_command_pool,
+            global_ubo_update_cmd_buffer,
             swapchain_state,
             render_pass,
             image_available_semaphores,
             frame_finished_semaphores,
-            global_ubo_update_semaphore,
+            global_ubo_update_fence,
             frame_fences,
             descriptor_pool,
             global_ubo,
@@ -541,15 +556,6 @@ impl<B: Backend> Graphics<B> {
         let frame_finished_semaphore =
             &self.frame_finished_semaphores[self.current_frame];
 
-        // Make sure there are no more than MAX_FRAMES frames in flight.
-        // TODO: somehow check that `wait_for_frame` has already been
-        // run.
-        unsafe {
-            self.device.wait_for_fence(frame_fence, !0).unwrap();
-            self.device.reset_fence(frame_fence).unwrap();
-            self.frame_command_pools[self.current_frame].reset();
-        }
-
         if self.swapchain_update || self.viewport_update {
             let old_viewport = self.swapchain_state.viewport.clone();
 
@@ -585,14 +591,19 @@ impl<B: Backend> Graphics<B> {
             }
         }
 
-        let ubo_update = self.first_frame || self.viewport_update;
-        if ubo_update {
+        if self.first_frame || self.viewport_update {
             // Update the global UBO.
-            // self.transfer_command_pool.reset();
-            let mut cmd_buffer =
-                self.transfer_command_pool.acquire_command_buffer::<OneShot>();
-
             unsafe {
+                // Make sure the command pool doesn't get reset while the
+                // last update is still running. It's okay to block on
+                // this since it doesn't happen very often.
+                self.device.wait_for_fence(&self.global_ubo_update_fence, 10_000_000).unwrap();
+                self.device.reset_fence(&self.global_ubo_update_fence).unwrap();
+                // Reset the command buffer, so that it can be
+                // rerecorded with the new data.
+                self.global_ubo_update_command_pool.reset();
+                let cmd_buffer = &mut self.global_ubo_update_cmd_buffer;
+
                 cmd_buffer.begin();
 
                 let (width, height) = (
@@ -610,7 +621,25 @@ impl<B: Backend> Graphics<B> {
                 // Double unsafe!
                 let data: [u8; 4 * 2] = mem::transmute(data);
 
+                // Barrier to prevent updating the ubo while it's
+                // still in use in a previous frame.
+                let barrier = Barrier::whole_buffer(
+                    &self.global_ubo,
+                    buffer::Access::TRANSFER_WRITE..
+                        buffer::Access::CONSTANT_BUFFER_READ,
+                );
+                // As of right now, the vertex shader reads the ubo,
+                // but the fragment shader does not. If that changes,
+                // this needs to be changed to VERTEX_SHADER | FRAGMENT_SHADER.
+                cmd_buffer.pipeline_barrier(
+                    PipelineStage::VERTEX_SHADER..PipelineStage::TRANSFER,
+                    Dependencies::empty(),
+                    &[barrier],
+                );
                 cmd_buffer.update_buffer(&self.global_ubo, 0, &data);
+
+                // Barrier to prevent future frames from reading the
+                // ubo until the update finishes.
                 let barrier = Barrier::whole_buffer(
                     &self.global_ubo,
                     buffer::Access::TRANSFER_WRITE..
@@ -624,13 +653,14 @@ impl<B: Backend> Graphics<B> {
 
                 cmd_buffer.finish();
 
-                let submission = Submission {
-                    command_buffers: Some(&cmd_buffer),
-                    wait_semaphores: None,
-                    signal_semaphores: Some(&self.global_ubo_update_semaphore),
-                };
-                self.queue_groups.transfer_queue().submit(submission, None);
+                self.queue_groups.graphics_queue().submit_nosemaphores(Some(&*cmd_buffer), Some(&self.global_ubo_update_fence));
             }
+        }
+
+        // Make sure there are no more than MAX_FRAMES frames in flight.
+        unsafe {
+            self.device.wait_for_fence(frame_fence, !0).unwrap();
+            self.device.reset_fence(frame_fence).unwrap();
         }
 
         // Get swapchain index
@@ -644,25 +674,13 @@ impl<B: Backend> Graphics<B> {
                 .unwrap()
         };
 
-        let mut cmd_buffer = self.frame_command_pools[self.current_frame]
-            .acquire_command_buffer::<OneShot>();
+        unsafe {
+            self.frame_command_pools[self.current_frame].reset();
+        }
+        let cmd_buffer = &mut self.frame_cmd_buffers[self.current_frame];
 
         unsafe {
             cmd_buffer.begin();
-
-            // Insert a barrier if the ubo was updated.
-            if ubo_update {
-                let barrier = Barrier::whole_buffer(
-                    &self.global_ubo,
-                    buffer::Access::empty()..
-                        buffer::Access::CONSTANT_BUFFER_READ,
-                );
-                cmd_buffer.pipeline_barrier(
-                    PipelineStage::TRANSFER..PipelineStage::VERTEX_SHADER,
-                    Dependencies::empty(),
-                    &[barrier],
-                );
-            }
 
             {
                 // TODO: multithread this, and possibly cache command
@@ -700,20 +718,9 @@ impl<B: Backend> Graphics<B> {
 
             cmd_buffer.finish();
 
-            let mut wait_semaphores = SmallVec::<[_; 2]>::new();
-            wait_semaphores.push((
-                image_available_semaphore,
-                PipelineStage::COLOR_ATTACHMENT_OUTPUT,
-            ));
-            if ubo_update {
-                wait_semaphores.push((
-                    &self.global_ubo_update_semaphore,
-                    PipelineStage::VERTEX_SHADER,
-                ));
-            }
             let submission = Submission {
-                command_buffers: Some(&cmd_buffer),
-                wait_semaphores,
+                command_buffers: Some(&*cmd_buffer),
+                wait_semaphores: Some((image_available_semaphore, PipelineStage::COLOR_ATTACHMENT_OUTPUT)),
                 signal_semaphores: Some(frame_finished_semaphore),
             };
             self.queue_groups
@@ -751,10 +758,11 @@ impl<B: Backend> Graphics<B> {
             transfer_command_pool,
             transfer_fence,
             frame_command_pools,
+            global_ubo_update_command_pool,
             render_pass,
             frame_finished_semaphores,
             image_available_semaphores,
-            global_ubo_update_semaphore,
+            global_ubo_update_fence,
             frame_fences,
             descriptor_pool,
             swapchain_state,
@@ -769,13 +777,14 @@ impl<B: Backend> Graphics<B> {
             device.destroy_fence(transfer_fence);
             swapchain_state.destroy(&device);
             device.destroy_command_pool(transfer_command_pool.into_raw());
+            device.destroy_command_pool(global_ubo_update_command_pool.into_raw());
             for command_pool in frame_command_pools.into_iter() {
                 device.destroy_command_pool(command_pool.into_raw());
             }
             for fence in frame_fences.into_iter() {
                 device.destroy_fence(fence);
             }
-            device.destroy_semaphore(global_ubo_update_semaphore);
+            device.destroy_fence(global_ubo_update_fence);
             for semaphore in frame_finished_semaphores.into_iter() {
                 device.destroy_semaphore(semaphore);
             }
