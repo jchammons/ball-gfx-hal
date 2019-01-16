@@ -389,7 +389,7 @@ impl Server {
     fn game_tick(&mut self) {
         let now = Instant::now();
         let (dt, interval) = self.game_tick.next(now);
-        let mut dt = dt.as_float_secs() as f32;
+        let dt = dt.as_float_secs() as f32;
         self.timer.set_timeout(interval, TimeoutState::GameTick);
 
         debug!("stepping game tick (dt={})", dt);

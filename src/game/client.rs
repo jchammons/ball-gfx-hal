@@ -213,7 +213,7 @@ impl Game {
         &self,
         process: F,
     ) -> O {
-        let mut snapshots = self.snapshots.lock();
+        let snapshots = self.snapshots.lock();
         // Why is there no .last() for VecDeque?
         let (snapshot, _) = &snapshots[snapshots.len() - 1];
         let players = self.players.lock();
