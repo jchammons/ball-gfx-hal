@@ -1,4 +1,3 @@
-use crate::double_buffer::DoubleBuffer;
 use crate::game::{client::Game, Input};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
@@ -62,7 +61,7 @@ pub enum ClientState {
     },
     Connected {
         tick: Interval,
-        snapshot_seq_ids: DoubleBuffer<u32>,
+        latest_snapshot_seq: u32,
         game: Arc<Game>,
     },
 }
@@ -379,13 +378,13 @@ impl Client {
                 Some(ClientState::Connected {
                     game,
                     tick,
-                    snapshot_seq_ids: DoubleBuffer::new(sequence),
+                    latest_snapshot_seq: sequence,
                 })
             },
 
             ClientState::Connected {
                 ref mut game,
-                ref mut snapshot_seq_ids,
+                ref mut latest_snapshot_seq,
                 ..
             } => {
                 let (packet, sequence, _) =
@@ -397,20 +396,13 @@ impl Client {
                     } => {
                         game.input_buffer.lock().packet_ack(input_sequence);
                         trace!("got snapshot from server");
-                        if sequence > *snapshot_seq_ids.get() {
-                            // Things are normal, rotate the buffers
-                            // as expected.
-                            game.insert_snapshot(snapshot, input_delay, true);
-                            snapshot_seq_ids.insert(sequence);
-                            snapshot_seq_ids.swap();
-                        } else if sequence > *snapshot_seq_ids.get_old() {
-                            // This snapshot belongs in between the
-                            // current ones, so just replace old.
-                            game.insert_snapshot(snapshot, input_delay, false);
-                            snapshot_seq_ids.insert(sequence);
+                        // Only process snapshots that are newer than
+                        // the last one. Out of order snapshots are
+                        // dropped.
+                        if sequence > *latest_snapshot_seq {
+                            game.insert_snapshot(snapshot, input_delay);
+                            *latest_snapshot_seq = sequence;
                         }
-                        // Otherwise it's really old and we don't
-                        // care.
                     },
                     ServerPacket::PlayerJoined {
                         id,

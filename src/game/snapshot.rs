@@ -59,6 +59,26 @@ pub struct InterpolatedSnapshot<'a> {
     new: &'a Snapshot,
 }
 
+pub trait SnapshotView<'a> {
+    /// Hopefully existential types will be a thing soon so using
+    /// `Box` here won't be needed.
+    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a>;
+}
+
+impl<'a> SnapshotView<'a> for &'a Snapshot {
+    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a> {
+        Box::new(self.players.iter().map(|(&id, &state)| (id, state)))
+    }
+}
+
+impl<'a> From<InterpolatedSnapshot<'a>> for Snapshot {
+    fn from(snapshot: InterpolatedSnapshot<'a>) -> Snapshot {
+        Snapshot {
+            players: snapshot.players().collect(),
+        }
+    }
+}
+
 impl<'a> InterpolatedSnapshot<'a> {
     pub fn new(
         alpha: f32,
@@ -71,15 +91,17 @@ impl<'a> InterpolatedSnapshot<'a> {
             new,
         }
     }
+}
 
-    pub fn players(self) -> impl Iterator<Item = (PlayerId, PlayerState)> + 'a {
-        self.new.players.iter().map(move |(&id, new)| {
+impl<'a> SnapshotView<'a> for InterpolatedSnapshot<'a> {
+    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a> {
+        Box::new(self.new.players.iter().map(move |(&id, new)| {
             match self.old.players.get(&id) {
                 // If the old snapshot contains this player, interpolate.
                 Some(old) => (id, old.interpolate(new, self.alpha)),
                 // Otherwise just use only the new snapshots.
                 None => (id, *new),
             }
-        })
+        }))
     }
 }

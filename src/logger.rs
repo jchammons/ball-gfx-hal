@@ -146,7 +146,7 @@ impl Log for Logger {
                     &internal.text[start..internal.head - 1],
                 )
             };
-            println!("{} {}", level, msg);
+            eprintln!("{} {}", level, msg);
 
             internal.records.push_back(Record {
                 level: record.level(),
