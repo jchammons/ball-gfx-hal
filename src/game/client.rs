@@ -1,4 +1,3 @@
-use crate::double_buffer::DoubleBuffer;
 use crate::game::{
     step_dt,
     GetPlayer,
@@ -8,14 +7,15 @@ use crate::game::{
     PlayerId,
     PlayerState,
     Snapshot,
+    SnapshotView,
     StaticPlayerState,
 };
-use log::{debug, warn};
+use crate::networking::server;
+use log::warn;
 use nalgebra::Point2;
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::iter;
-use std::time::Instant;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct Player<'a> {
@@ -23,18 +23,17 @@ pub struct Player<'a> {
     state: PlayerState,
 }
 
-/// Constructs an iterator over all complete players, including
-/// snapshot interpolation and predicted position for the client's
-/// player.
-pub struct Players<'a, 'b: 'a> {
-    players: &'b HashMap<PlayerId, StaticPlayerState>,
-    snapshot: InterpolatedSnapshot<'a>,
-    predicted: (PlayerId, PlayerState),
+/// Constructs an iterator over all complete players with a given
+/// snapshot view.
+pub struct Players<'a, S> {
+    players: &'a HashMap<PlayerId, StaticPlayerState>,
+    snapshot: S,
+    // predicted: (PlayerId, PlayerState),
 }
 
 pub struct Game {
     players: Mutex<HashMap<PlayerId, StaticPlayerState>>,
-    snapshots: Mutex<DoubleBuffer<(Snapshot, Instant)>>,
+    snapshots: Mutex<VecDeque<(Snapshot, Instant)>>,
     pub input_buffer: Mutex<InputBuffer>,
     /// Player id for this client.
     player_id: PlayerId,
@@ -55,7 +54,7 @@ impl<'a, 'b> GetPlayer for &'b Player<'a> {
     }
 }
 
-impl<'a, 'b: 'a> Players<'a, 'b> {
+impl<'a: 'b, 'b, S: SnapshotView<'b>> Players<'a, S> {
     /// This doesn't use the `IntoIterator` trait, since it needs impl
     /// Trait.
     ///
@@ -64,39 +63,37 @@ impl<'a, 'b: 'a> Players<'a, 'b> {
     #[allow(clippy::should_implement_trait)]
     pub fn into_iter(
         self,
-    ) -> impl Iterator<Item = (PlayerId, Player<'b>)> + 'a {
+    ) -> impl Iterator<Item = (PlayerId, Player<'a>)> + 'b {
         let Players {
             players,
-            predicted,
+            // predicted,
             snapshot,
         } = self;
 
-        let predicted = (
-            predicted.0,
-            Player {
-                static_state: &players[&predicted.0],
-                state: predicted.1,
-            },
-        );
+        // let predicted = (
+        // predicted.0,
+        // Player {
+        // static_state: &players[&predicted.0],
+        // state: predicted.1,
+        // },
+        // );
 
-        snapshot
-            .players()
-            .filter_map(move |(id, state)| {
-                // Only handle players who also have static state
-                // stored. If the static state isn't there, the player
-                // must have already been removed, but we haven't received
-                // the new snapshot.
-                players.get(&id).map(|static_state| {
-                    (
-                        id,
-                        Player {
-                            static_state,
-                            state,
-                        },
-                    )
-                })
+        snapshot.players().filter_map(move |(id, state)| {
+            // Only handle players who also have static state
+            // stored. If the static state isn't there, the player
+            // must have already been removed, but we haven't received
+            // the new snapshot.
+            players.get(&id).map(|static_state| {
+                (
+                    id,
+                    Player {
+                        static_state,
+                        state,
+                    },
+                )
             })
-            .chain(iter::once(predicted))
+        })
+        //.chain(iter::once(predicted))
     }
 }
 
@@ -107,12 +104,11 @@ impl Game {
         player_id: PlayerId,
         cursor: Point2<f32>,
     ) -> Game {
+        let mut snapshots = VecDeque::new();
+        snapshots.push_back((snapshot, Instant::now()));
         Game {
             players: Mutex::new(players),
-            snapshots: Mutex::new(DoubleBuffer::new((
-                snapshot,
-                Instant::now(),
-            ))),
+            snapshots: Mutex::new(snapshots),
             input_buffer: Mutex::new(InputBuffer::new(Input {
                 cursor,
             })),
@@ -156,85 +152,125 @@ impl Game {
     ///
     /// `input_delay` is the time in seconds since the last received
     /// input used to generate the snapshot.
-    ///
-    /// If `new` is `true`, the snapshot is the most recent. Otherwise
-    /// it is old.
     pub fn insert_snapshot(
         &self,
-        mut snapshot: Snapshot,
-        mut input_delay: f32,
-        new: bool,
+        snapshot: Snapshot,
+        _input_delay: f32,
     ) {
+        // TODO!
+        
         // Remove the client's player from the snapshot, and reconcile
         // predicted state.
-        if let Some(player) = snapshot.players.remove(&self.player_id) {
-            if new {
-                let input_buffer = self.input_buffer.lock();
-                // Update the predicted big ball position/velocity.
-                let mut ball = player.ball;
-                let mut cursor = player.cursor;
-                // Fast-forward through all unacknowledged inputs.
-                for (input, dt) in input_buffer.inputs() {
-                    let dt_adjusted = (dt - input_delay).max(0.0);
-                    // Only take input delay into account for the
-                    // first input.
-                    input_delay -= dt.min(input_delay);
-
-                    debug!("replaying input: {:?} {}", input, dt_adjusted);
-                    for dt in step_dt(dt_adjusted, 1.0 / 60.0) {
-                        ball.tick(dt, cursor);
-                    }
-                    cursor = input.cursor;
-                }
-                let dt =
-                    (input_buffer.delay(Instant::now()) - input_delay).max(0.0);
+        /*if let Some(player) = snapshot.players.get(&self.player_id) {
+            let input_buffer = self.input_buffer.lock();
+            // Update the predicted big ball position/velocity.
+            let mut ball = player.ball;
+            let mut cursor = player.cursor;
+            /*
+            // Fast-forward through all unacknowledged inputs. // 
+            for (input, dt) in input_buffer.inputs() { // 
+            // Only take input delay into account for the // 
+            // first input. // 
+            let dt = (dt - input_delay).max(0.0); // 
+            input_delay -= dt; // 
+            // 
+            debug!("replaying input: {:?} {}", input, dt); // 
+            for dt in step_dt(dt, 1.0 / 60.0) { // 
+            ball.tick(dt, cursor); // 
+        } // 
+            cursor = input.cursor; // 
+        } // 
+            let dt = // 
+            (input_buffer.delay(Instant::now()) - input_delay).max(0.0); // 
+            for dt in step_dt(dt, 1.0 / 60.0) { // 
+            ball.tick(dt, cursor); // 
+        } */
+            // Since the protocol only sends over the latest
+            // input, that's the only thing we need to predict.
+            /*let dt: f32 = input_buffer.inputs().map(|(_, dt)| dt).sum();
+            if let Some((input, _)) = input_buffer.inputs().last() {
+                //let dt = (dt - input_delay).max(0.0);
+                //let dt = input_delay;
+                cursor = input.cursor;
+                // TODO possibly just use calculus here instead
                 for dt in step_dt(dt, 1.0 / 60.0) {
                     ball.tick(dt, cursor);
                 }
-                let mut predicted = self.predicted.lock();
-                predicted.ball = ball;
-            }
-        }
+            }*/
+            let mut predicted = self.predicted.lock();
+            predicted.ball = ball;
+        }*/
 
         let mut snapshots = self.snapshots.lock();
-        snapshots.insert((snapshot, Instant::now()));
-        if new {
-            snapshots.swap();
-        }
+        snapshots.push_back((snapshot, Instant::now()));
     }
 
-    /// Interpolates the two most recent snapshots and processes the
-    /// resulting set of players.
+    /// Processes the set of players corresponding to the most recent snapshot.
     ///
     /// Note that mutexes will be locked for the duration of
     /// `process`, so don't block or anything.
-    pub fn players<O, F: FnOnce(Players) -> O>(
+    pub fn latest_players<O, F: FnOnce(Players<&Snapshot>) -> O>(
         &self,
-        time: Instant,
         process: F,
     ) -> O {
-        let snapshots = self.snapshots.lock();
-        let &(ref old, old_time) = snapshots.get_old();
-        let &(ref new, new_time) = snapshots.get();
-        let alpha = if old_time == new_time || time < new_time {
-            // First set of snapshots, or snapshot received after
-            // frame started, so just use purely old.
-
-            // TODO: this is *definitely* causing jittering
-            0.0
-        } else {
-            debug_assert!(old_time < new_time);
-            let span = new_time.duration_since(old_time).as_float_secs();
-
-            time.duration_since(new_time).as_float_secs() / span
-        } as f32;
-
-        let snapshot = InterpolatedSnapshot::new(alpha, old, new);
+        let mut snapshots = self.snapshots.lock();
+        // Why is there no .last() for VecDeque?
+        let (snapshot, _) = &snapshots[snapshots.len() - 1];
         let players = self.players.lock();
         let players = Players {
             players: &*players,
             snapshot,
-            predicted: (self.player_id, *self.predicted.lock()),
+        };
+        process(players)
+    }
+
+    /// Interpolates snapshots with delay and processes the resulting
+    /// set of players.
+    ///
+    /// Note that mutexes will be locked for the duration of
+    /// `process`, so don't block or anything.
+    pub fn interpolated_players<
+        O,
+        F: FnOnce(Players<InterpolatedSnapshot>) -> O,
+    >(
+        &self,
+        time: Instant,
+        delay: f32,
+        process: F,
+    ) -> O {
+        let mut snapshots = self.snapshots.lock();
+        let delayed_time = time -
+            Duration::from_float_secs((delay * server::SNAPSHOT_RATE) as f64);
+
+        // Get rid of old snapshots.
+        while snapshots.len() > 1 && delayed_time > snapshots[1].1 {
+            // Yay for short circuiting &&
+            snapshots.pop_front();
+        }
+
+        let (ref old, old_time) = snapshots[0];
+        let snapshot = match snapshots.get(1) {
+            Some(&(ref new, new_time)) => {
+                let alpha = if delayed_time > old_time {
+                    let span = new_time.duration_since(old_time);
+                    delayed_time.duration_since(old_time).div_duration(span)
+                } else {
+                    0.0
+                };
+                // If delayed_time is newer than both of the
+                // snapshots, one of them would have been removed
+                // earlier, so alpha should always be [0, 1].
+                debug_assert!(alpha < 1.0);
+                InterpolatedSnapshot::new(alpha as f32, old, new)
+            },
+            None => InterpolatedSnapshot::new(0.0, old, old),
+        };
+
+        let players = self.players.lock();
+        let players = Players {
+            players: &*players,
+            snapshot,
+            // predicted: (self.player_id, *self.predicted.lock()),
         };
         process(players)
     }

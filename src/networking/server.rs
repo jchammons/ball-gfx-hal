@@ -10,7 +10,7 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Token};
 use mio_extras::channel::{self, Receiver, Sender};
@@ -23,6 +23,9 @@ use std::net::SocketAddr;
 use std::sync::mpsc::TryRecvError;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+pub const SNAPSHOT_RATE: f32 = 1.0 / 30.0;
+pub const TICK_RATE: f32 = 1.0 / 60.0;
 
 const SOCKET: Token = Token(0);
 const TIMER: Token = Token(1);
@@ -251,7 +254,7 @@ impl Server {
     ) -> Result<Server, Error> {
         let socket = UdpSocket::bind(addr).map_err(Error::bind_socket)?;
         let mut timer = timer::Builder::default()
-            .tick_duration(Duration::from_millis(10))
+            .tick_duration(Duration::from_millis(5))
             .build();
         let poll = Poll::new().map_err(Error::poll_init)?;
         poll.register(&socket, SOCKET, Ready::readable(), PollOpt::edge())
@@ -263,9 +266,11 @@ impl Server {
 
         // Set timeout for the first tick. All subsequent ticks will
         // be generated from Server::send_tick.
-        let send_tick = Interval::new(Duration::from_float_secs(1.0 / 30.0)); // 30hz
+        let send_tick =
+            Interval::new(Duration::from_float_secs(SNAPSHOT_RATE as f64));
         timer.set_timeout(send_tick.interval(), TimeoutState::SendTick);
-        let game_tick = Interval::new(Duration::from_float_secs(1.0 / 60.0)); // 60hz
+        let game_tick =
+            Interval::new(Duration::from_float_secs(TICK_RATE as f64));
         timer.set_timeout(game_tick.interval(), TimeoutState::GameTick);
 
         Ok(Server {
@@ -387,13 +392,7 @@ impl Server {
         let mut dt = dt.as_float_secs() as f32;
         self.timer.set_timeout(interval, TimeoutState::GameTick);
 
-        trace!("stepping game tick (dt={})", dt);
-        // Make sure that the simulation is never stepped faster than
-        // 60hz, even if dt>1/60 sec.
-        while dt > 1.0 / 60.0 {
-            self.game.tick(1.0 / 60.0);
-            dt -= 1.0 / 60.0;
-        }
+        debug!("stepping game tick (dt={})", dt);
         self.game.tick(dt);
     }
 

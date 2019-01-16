@@ -41,6 +41,21 @@ fn bounds_circle() -> Circle {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct DebugOptions {
+    pub draw_latest_snapshot: bool,
+    pub interpolation_delay: f32,
+}
+
+impl Default for DebugOptions {
+    fn default() -> DebugOptions {
+        DebugOptions {
+            draw_latest_snapshot: false,
+            interpolation_delay: 1.5,
+        }
+    }
+}
+
 pub struct ConnectingState {
     server: Option<ServerHandle>,
     client: ClientHandle,
@@ -283,6 +298,7 @@ impl GameState {
         now: Instant,
         circle_rend: &mut CircleRenderer<B>,
         ctx: &mut DrawContext<B>,
+        debug: DebugOptions,
     ) {
         match self {
             GameState::MainMenu {
@@ -294,14 +310,33 @@ impl GameState {
                 game,
                 ..
             } => {
-                game.players(now, |players| {
-                    let circles = iter::once(bounds_circle()).chain(
-                        players
+                // TODO use the z-buffer to reduce overdraw here
+                circle_rend.draw(ctx, iter::once(bounds_circle()));
+                if debug.draw_latest_snapshot {
+                    // TODO avoid submitting a second drawcall here
+                    game.latest_players(|players| {
+                        let circles = players
                             .into_iter()
-                            .flat_map(|(_, player)| player.draw(SCALE)),
-                    );
-                    circle_rend.draw(ctx, circles)
-                });
+                            .flat_map(|(_, player)| player.draw(SCALE))
+                            .map(|circle| {
+                                Circle {
+                                    color: LinSrgb::new(0.8, 0.0, 0.0),
+                                    ..circle
+                                }
+                            });
+                        circle_rend.draw(ctx, circles);
+                    });
+                }
+                game.interpolated_players(
+                    now,
+                    debug.interpolation_delay,
+                    |players| {
+                        let circles = players
+                            .into_iter()
+                            .flat_map(|(_, player)| player.draw(SCALE));
+                        circle_rend.draw(ctx, circles);
+                    },
+                );
             },
         }
     }

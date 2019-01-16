@@ -60,6 +60,7 @@ fn run_gui() {
     let mut window_size = window.get_inner_size().unwrap();
 
     let mut game_state = state::GameState::default();
+    let mut debug_options = state::DebugOptions::default();
 
     let instance = backend::Instance::create("Ball", 1);
     let surface = instance.create_surface(&window);
@@ -109,6 +110,19 @@ fn run_gui() {
 
         let ui = imgui_winit.frame(&mut imgui, &window);
         ui.window(im_str!("Debug")).build(|| {
+            ui.tree_node(im_str!("Networking")).build(|| {
+                ui.checkbox(
+                    im_str!("Draw latest snapshot"),
+                    &mut debug_options.draw_latest_snapshot,
+                );
+
+                ui.input_float(
+                    im_str!("Interpolation delay"),
+                    &mut debug_options.interpolation_delay,
+                )
+                .build();
+            });
+
             ui.tree_node(im_str!("Graphics")).build(|| {
                 ui.plot_lines(im_str!("Frame time"), &frame_time_history)
                     .scale_max(1.0 / 20.0)
@@ -152,7 +166,7 @@ fn run_gui() {
         game_state.ui(&ui);
 
         let _ = graphics.draw_frame(ui, |mut ctx| {
-            game_state.draw(now, &mut circle_rend, &mut ctx);
+            game_state.draw(now, &mut circle_rend, &mut ctx, debug_options);
         });
     }
 

@@ -77,8 +77,8 @@ impl Game {
 
     /// Steps the whole game world forward in time.
     pub fn tick(&mut self, dt: f32) {
-        for player in self.players.values_mut() {
-            for dt in step_dt(dt, 1.0 / 60.0) {
+        for dt in step_dt(dt, 1.0 / 60.0) {
+            for player in self.players.values_mut() {
                 player.state.tick(dt);
             }
         }
