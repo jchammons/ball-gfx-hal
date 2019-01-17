@@ -1,3 +1,4 @@
+use crate::debug::DebugState;
 use crate::game::{client::Game, GetPlayer};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
@@ -38,21 +39,6 @@ fn bounds_circle() -> Circle {
             blue: 1.0,
             standard: PhantomData,
         },
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct DebugOptions {
-    pub draw_latest_snapshot: bool,
-    pub interpolation_delay: f32,
-}
-
-impl Default for DebugOptions {
-    fn default() -> DebugOptions {
-        DebugOptions {
-            draw_latest_snapshot: false,
-            interpolation_delay: 1.5,
-        }
     }
 }
 
@@ -298,7 +284,7 @@ impl GameState {
         now: Instant,
         circle_rend: &mut CircleRenderer<B>,
         ctx: &mut DrawContext<B>,
-        debug: DebugOptions,
+        debug: &DebugState,
     ) {
         match self {
             GameState::MainMenu {
