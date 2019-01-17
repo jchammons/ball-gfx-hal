@@ -10,17 +10,15 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
-use mio::{Event, Poll, PollOpt, Ready, Token};
-use mio_extras::channel::{self, Receiver, Sender};
+use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use mio_extras::timer::{self, Timer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::sync::mpsc::TryRecvError;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -90,23 +88,23 @@ pub struct Server {
     send_tick: Interval,
     game_tick: Interval,
     poll: Poll,
-    shutdown: Receiver<()>,
+    _shutdown: Registration,
 }
 
 pub struct ServerHandle {
-    pub shutdown: Sender<()>,
+    pub shutdown: SetReadiness,
 }
 
 /// Launches a server bound to a particular address.
 pub fn host(addr: SocketAddr) -> Result<(ServerHandle, JoinHandle<()>), Error> {
-    let (shutdown_tx, shutdown_rx) = channel::channel();
-    let mut server = Server::new(&addr, shutdown_rx)?;
+    let (shutdown_registration, shutdown_set_readiness) = Registration::new2();
+    let mut server = Server::new(&addr, shutdown_registration)?;
     let thread = thread::spawn(move || {
         run_event_loop(&mut server);
     });
     Ok((
         ServerHandle {
-            shutdown: shutdown_tx,
+            shutdown: shutdown_set_readiness,
         },
         thread,
     ))
@@ -115,7 +113,9 @@ pub fn host(addr: SocketAddr) -> Result<(ServerHandle, JoinHandle<()>), Error> {
 impl ServerHandle {
     /// Attmepts to signal the associated server to shutdown.
     pub fn shutdown(&self) {
-        let _ = self.shutdown.send(());
+        if let Err(err) = self.shutdown.set_readiness(Ready::readable()) {
+            warn!("failed to signal shutdown to server: {}", err)
+        }
     }
 }
 
@@ -225,20 +225,8 @@ impl EventHandler for Server {
                 }
             },
             SHUTDOWN => {
-                match self.shutdown.try_recv() {
-                    Ok(()) => {
-                        info!("server received shutdown from handle");
-                        return true;
-                    },
-                    Err(TryRecvError::Disconnected) => {
-                        error!(
-                            "server handle has disconnected without sending \
-                             shutdown"
-                        );
-                        return true;
-                    },
-                    Err(TryRecvError::Empty) => (),
-                }
+                info!("server received shutdown from handle");
+                return true;
             },
             _ => unreachable!(),
         }
@@ -250,7 +238,7 @@ impl EventHandler for Server {
 impl Server {
     pub fn new(
         addr: &SocketAddr,
-        shutdown: Receiver<()>,
+        shutdown: Registration,
     ) -> Result<Server, Error> {
         let socket = UdpSocket::bind(addr).map_err(Error::bind_socket)?;
         let mut timer = timer::Builder::default()
@@ -283,7 +271,7 @@ impl Server {
             send_tick,
             game_tick,
             poll,
-            shutdown,
+            _shutdown: shutdown,
         })
     }
 

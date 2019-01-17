@@ -38,6 +38,7 @@ ord_subset = "3.1.1"
 nalgebra = { version = "0.16.12", features = ["serde-serialize"] }
 num-traits = "0.2.6"
 either = "1.5.0"
+crossbeam = "0.6.0"
 
 [build-dependencies]
 shaderc = "0.3.12"

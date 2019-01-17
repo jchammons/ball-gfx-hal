@@ -1,29 +1,20 @@
+use crate::debug::{NetworkStats, NETWORK_STATS_RATE};
 use crate::game::{client::Game, Input};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
 use crate::networking::{Error, MAX_PACKET_SIZE};
-use log::{error, info, trace};
+use crossbeam::channel::{self, Receiver, Sender};
+use log::{error, info, trace, warn};
 use mio::net::UdpSocket;
-use mio::{Event, Poll, PollOpt, Ready, Token};
-use mio_extras::channel::{
-    self as mio_channel,
-    Receiver as MioReceiver,
-    Sender as MioSender,
-};
+use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use mio_extras::timer::{self, Timeout, Timer};
 use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
-use std::sync::mpsc::{
-    self as std_channel,
-    Receiver as StdReceiver,
-    Sender as StdSender,
-    TryRecvError,
-};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +26,7 @@ const SHUTDOWN: Token = Token(2);
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TimeoutState {
     Tick,
+    UpdateStats,
     Connect,
 }
 
@@ -55,7 +47,7 @@ pub struct ClientHandshake {
 
 pub enum ClientState {
     Connecting {
-        done: StdSender<Result<Arc<Game>, Error>>,
+        done: Sender<Result<Arc<Game>, Error>>,
         timeout: Timeout,
         cursor: Point2<f32>,
     },
@@ -74,34 +66,38 @@ pub struct Client {
     poll: Poll,
     connection: Connection,
     state: ClientState,
-    shutdown: MioReceiver<()>,
+    _shutdown: Registration,
     /// Marks after `shutdown` has been received, to shutdown when the
     /// `send_queue` is empty.
     needs_shutdown: bool,
+    stats_tx: Sender<NetworkStats>,
+    stats: NetworkStats,
 }
 
 /// Client handle used while connecting to a sever.
 pub struct ClientHandle {
-    shutdown: MioSender<()>,
+    shutdown: SetReadiness,
 }
 
 pub struct ConnectingHandle {
-    done: StdReceiver<Result<Arc<Game>, Error>>,
+    done: Receiver<Result<Arc<Game>, Error>>,
 }
 
 pub fn connect(
     addr: SocketAddr,
+    stats: Sender<NetworkStats>,
     cursor: Point2<f32>,
 ) -> Result<(ClientHandle, ConnectingHandle), Error> {
-    let (done_tx, done_rx) = std_channel::channel();
-    let (shutdown_tx, shutdown_rx) = mio_channel::channel();
-    let mut client = Client::new(addr, done_tx, shutdown_rx, cursor)?;
+    let (done_tx, done_rx) = channel::bounded(1);
+    let (shutdown_registration, shutdown_set_readiness) = Registration::new2();
+    let mut client =
+        Client::new(addr, done_tx, stats, shutdown_registration, cursor)?;
     thread::spawn(move || {
         run_event_loop(&mut client);
     });
     Ok((
         ClientHandle {
-            shutdown: shutdown_tx,
+            shutdown: shutdown_set_readiness,
         },
         ConnectingHandle {
             done: done_rx,
@@ -112,7 +108,9 @@ pub fn connect(
 impl ClientHandle {
     /// Signals the client thread to shutdown.
     pub fn shutdown(&self) {
-        let _ = self.shutdown.send(());
+        if let Err(err) = self.shutdown.set_readiness(Ready::readable()) {
+            warn!("failed to signal shutdown to client: {}", err)
+        }
     }
 }
 
@@ -121,10 +119,7 @@ impl ConnectingHandle {
     pub fn done(&mut self) -> Option<Result<Arc<Game>, Error>> {
         match self.done.try_recv() {
             Ok(done) => Some(done),
-            Err(TryRecvError::Empty) => None,
-            // Disconnected also means it never finished connecting,
-            // but maybe we should handle this a different way.
-            Err(TryRecvError::Disconnected) => None,
+            Err(_) => None,
         }
     }
 }
@@ -165,6 +160,16 @@ impl EventHandler for Client {
                                 error!("error sending tick packet: {}", err);
                             }
                         },
+                        TimeoutState::UpdateStats => {
+                            self.stats_tx.send(self.stats).unwrap();
+                            self.stats = NetworkStats::default();
+                            self.timer.set_timeout(
+                                Duration::from_float_secs(
+                                    NETWORK_STATS_RATE as f64,
+                                ),
+                                TimeoutState::UpdateStats,
+                            );
+                        },
                         TimeoutState::Connect => {
                             if let ClientState::Connecting {
                                 ref mut done,
@@ -180,18 +185,13 @@ impl EventHandler for Client {
                 }
             },
             SHUTDOWN => {
-                match self.shutdown.try_recv() {
-                    Ok(()) | Err(TryRecvError::Disconnected) => {
-                        info!("client started shutdown");
-                        if let Err(err) = self.send(&ClientPacket::Disconnect) {
-                            error!("failed to send disconnect packet: {}", err);
-                            // If this errored, just shut down immediately.
-                            return true;
-                        }
-                        self.needs_shutdown = true;
-                    },
-                    Err(TryRecvError::Empty) => (),
+                info!("client started shutdown");
+                if let Err(err) = self.send(&ClientPacket::Disconnect) {
+                    error!("failed to send disconnect packet: {}", err);
+                    // If this errored, just shut down immediately.
+                    return true;
                 }
+                self.needs_shutdown = true;
             },
             Token(_) => unreachable!(),
         }
@@ -203,8 +203,9 @@ impl EventHandler for Client {
 impl Client {
     pub fn new(
         addr: SocketAddr,
-        done: StdSender<Result<Arc<Game>, Error>>,
-        shutdown: MioReceiver<()>,
+        done: Sender<Result<Arc<Game>, Error>>,
+        stats: Sender<NetworkStats>,
+        shutdown: Registration,
         cursor: Point2<f32>,
     ) -> Result<Client, Error> {
         let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap())
@@ -223,6 +224,10 @@ impl Client {
 
         let timeout =
             timer.set_timeout(Duration::from_secs(5), TimeoutState::Connect);
+        timer.set_timeout(
+            Duration::from_float_secs(NETWORK_STATS_RATE as f64),
+            TimeoutState::UpdateStats,
+        );
 
         let mut client = Client {
             socket,
@@ -236,7 +241,9 @@ impl Client {
                 timeout,
                 cursor,
             },
-            shutdown,
+            _shutdown: shutdown,
+            stats_tx: stats,
+            stats: NetworkStats::default(),
             needs_shutdown: false,
         };
 
@@ -252,6 +259,7 @@ impl Client {
         loop {
             match self.socket.recv(&mut self.recv_buffer) {
                 Ok(bytes_read) => {
+                    self.stats.bytes_in += bytes_read as u32;
                     if let Err(err) = self.on_recv(bytes_read) {
                         error!("{}", err);
                     }
@@ -282,6 +290,7 @@ impl Client {
                 },
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
+                    self.stats.bytes_out += bytes_written as u32;
                     if bytes_written < packet.len() {
                         error!(
                             "Only wrote {} out of {} bytes for client packet: \
