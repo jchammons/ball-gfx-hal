@@ -84,17 +84,15 @@ impl Connection {
     pub fn send_header<B: Write>(
         &mut self,
         mut packet: B,
-    ) -> Result<(), Error> {
-        packet
-            .write_u32::<BE>(self.local_sequence)
-            .map_err(Error::header_write)?;
+    ) -> Result<u32, Error> {
+        let sequence = self.local_sequence;
+        self.local_sequence += 1;
+        packet.write_u32::<BE>(sequence).map_err(Error::header_write)?;
         packet.write_u32::<BE>(self.acks.ack).map_err(Error::header_write)?;
         packet
             .write_u32::<BE>(self.acks.ack_bits)
             .map_err(Error::header_write)?;
-        self.local_sequence += 1;
-
-        Ok(())
+        Ok(sequence)
     }
 
     /// Reads the header of a packet, and then deserializes the

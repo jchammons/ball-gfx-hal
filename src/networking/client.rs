@@ -4,7 +4,7 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
-use crate::networking::{Error, MAX_PACKET_SIZE};
+use crate::networking::{Error, RttEstimator, MAX_PACKET_SIZE, PING_RATE};
 use crossbeam::channel::{self, Receiver, Sender};
 use log::{error, info, trace, warn};
 use mio::net::UdpSocket;
@@ -23,9 +23,12 @@ const SOCKET: Token = Token(0);
 const TIMER: Token = Token(1);
 const SHUTDOWN: Token = Token(2);
 
+const TICK_RATE: f32 = 1.0 / 30.0;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TimeoutState {
     Tick,
+    Ping,
     UpdateStats,
     Connect,
 }
@@ -37,6 +40,8 @@ pub enum ClientPacket {
         input: Input,
     },
     Disconnect,
+    Ping,
+    Pong(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +58,8 @@ pub enum ClientState {
     },
     Connected {
         tick: Interval,
+        rtt: RttEstimator,
+        ping: Interval,
         latest_snapshot_seq: u32,
         game: Arc<Game>,
     },
@@ -155,18 +162,32 @@ impl EventHandler for Client {
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
+                        TimeoutState::Ping => {
+                            if let Err(err) = self.send_ping() {
+                                error!("error sending ping packet: {}", err);
+                            }
+                        },
                         TimeoutState::Tick => {
                             if let Err(err) = self.send_tick() {
                                 error!("error sending tick packet: {}", err);
                             }
                         },
                         TimeoutState::UpdateStats => {
+                            if let ClientState::Connected {
+                                ref rtt,
+                                ..
+                            } = self.state
+                            {
+                                if let Some(rtt) = rtt.rtt() {
+                                    self.stats.rtt = rtt;
+                                }
+                            }
                             self.stats_tx.send(self.stats).unwrap();
                             self.stats = NetworkStats::default();
                             self.timer.set_timeout(
-                                Duration::from_float_secs(
-                                    NETWORK_STATS_RATE as f64,
-                                ),
+                                Duration::from_float_secs(f64::from(
+                                    NETWORK_STATS_RATE,
+                                )),
                                 TimeoutState::UpdateStats,
                             );
                         },
@@ -225,7 +246,7 @@ impl Client {
         let timeout =
             timer.set_timeout(Duration::from_secs(5), TimeoutState::Connect);
         timer.set_timeout(
-            Duration::from_float_secs(NETWORK_STATS_RATE as f64),
+            Duration::from_float_secs(f64::from(NETWORK_STATS_RATE)),
             TimeoutState::UpdateStats,
         );
 
@@ -322,6 +343,24 @@ impl Client {
         }
     }
 
+    fn send_ping(&mut self) -> Result<(), Error> {
+        let sequence = self.send(&ClientPacket::Ping)?;
+        match self.state {
+            ClientState::Connected {
+                ref mut ping,
+                ref mut rtt,
+                ..
+            } => {
+                let now = Instant::now();
+                let (_, interval) = ping.next(now);
+                self.timer.set_timeout(interval, TimeoutState::Ping);
+                rtt.ping(sequence, now);
+            },
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
     fn send_tick(&mut self) -> Result<(), Error> {
         match self.state {
             ClientState::Connected {
@@ -374,10 +413,16 @@ impl Client {
                     handshake.id,
                     *cursor,
                 ));
-                let tick = Interval::new(Duration::from_float_secs(1.0 / 30.0));
-                // Start the timer for sending input ticks.
+                let tick = Interval::new(Duration::from_float_secs(f64::from(
+                    TICK_RATE,
+                )));
+                let ping = Interval::new(Duration::from_float_secs(f64::from(
+                    PING_RATE,
+                )));
+                // Start the timer for sending input ticks and pings.
                 self.timer.cancel_timeout(timeout);
                 self.timer.set_timeout(tick.interval(), TimeoutState::Tick);
+                self.timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
                 // Signal the main thread that connection finished.
                 done.send(Ok(game.clone())).unwrap();
@@ -387,6 +432,8 @@ impl Client {
                 Some(ClientState::Connected {
                     game,
                     tick,
+                    ping,
+                    rtt: RttEstimator::default(),
                     latest_snapshot_seq: sequence,
                 })
             },
@@ -394,6 +441,7 @@ impl Client {
             ClientState::Connected {
                 ref mut game,
                 ref mut latest_snapshot_seq,
+                ref mut rtt,
                 ..
             } => {
                 let (packet, sequence, _) =
@@ -424,6 +472,12 @@ impl Client {
                         info!("player {} left", id);
                         game.remove_player(id);
                     },
+                    ServerPacket::Pong(sequence) => {
+                        rtt.pong(sequence);
+                    },
+                    ServerPacket::Ping => {
+                        self.send(&ClientPacket::Pong(sequence))?;
+                    },
                 }
 
                 None
@@ -437,16 +491,16 @@ impl Client {
         Ok(())
     }
 
-    fn send<P: Serialize>(&mut self, contents: &P) -> Result<(), Error> {
+    fn send<P: Serialize>(&mut self, contents: &P) -> Result<u32, Error> {
         // Don't send any additional packets while shutting down.
         if self.needs_shutdown {
-            return Ok(());
+            return Err(Error::ShuttingDown);
         }
 
         let size = bincode::serialized_size(contents)
             .map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
-        self.connection.send_header(&mut packet)?;
+        let sequence = self.connection.send_header(&mut packet)?;
         bincode::serialize_into(&mut packet, contents)
             .map_err(Error::serialize)?;
         self.send_queue.push_back(packet);
@@ -459,6 +513,6 @@ impl Client {
             )
             .map_err(Error::poll_register)?;
 
-        Ok(())
+        Ok(sequence)
     }
 }

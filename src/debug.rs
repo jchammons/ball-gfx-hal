@@ -16,6 +16,8 @@ pub struct NetworkStats {
     pub bytes_out: u32,
     /// Number of bytes received since the last recorded stats.
     pub bytes_in: u32,
+    /// Estimated round trip time.
+    pub rtt: f32,
 }
 
 /// State and options related to the debug window.
@@ -37,6 +39,7 @@ pub struct DebugState {
     network_rx: Receiver<NetworkStats>,
     bandwidth_in_history: [f32; NETWORK_HISTORY_LENGTH],
     bandwidth_out_history: [f32; NETWORK_HISTORY_LENGTH],
+    rtt_history: [f32; NETWORK_HISTORY_LENGTH],
     frame_time_history: [f32; FRAME_TIME_HISTORY_LENGTH],
 }
 
@@ -50,6 +53,7 @@ impl Default for DebugState {
             network_rx,
             bandwidth_in_history: [0.0; NETWORK_HISTORY_LENGTH],
             bandwidth_out_history: [0.0; NETWORK_HISTORY_LENGTH],
+            rtt_history: [0.0; NETWORK_HISTORY_LENGTH],
             frame_time_history: [0.0; FRAME_TIME_HISTORY_LENGTH],
         }
     }
@@ -73,6 +77,7 @@ impl DebugState {
             // Copy elements to make room for new ones.
             self.bandwidth_in_history.copy_within(size.., 0);
             self.bandwidth_out_history.copy_within(size.., 0);
+            self.rtt_history.copy_within(size.., 0);
             let start = NETWORK_HISTORY_LENGTH - size;
             for (i, stats) in self.network_rx.try_iter().enumerate() {
                 let bandwidth_in = stats.bytes_in as f32 / NETWORK_STATS_RATE;
@@ -80,6 +85,7 @@ impl DebugState {
                 // Convert to KB
                 self.bandwidth_in_history[start + i] = bandwidth_in / 1000.0;
                 self.bandwidth_out_history[start + i] = bandwidth_out / 1000.0;
+                self.rtt_history[start + i] = stats.rtt * 1000.0;
             }
         }
 
@@ -91,6 +97,7 @@ impl DebugState {
             ui.tree_node(im_str!("Networking")).build(|| {
                 let bandwidth_in = *self.bandwidth_in_history.last().unwrap();
                 let bandwidth_out = *self.bandwidth_out_history.last().unwrap();
+                let rtt = *self.rtt_history.last().unwrap();
 
                 ui.plot_lines(
                     im_str!("Bandwidth in"),
@@ -103,6 +110,7 @@ impl DebugState {
                     bandwidth_in
                 )))
                 .build();
+
                 ui.plot_lines(
                     im_str!("Bandwidth out"),
                     &self.bandwidth_out_history,
@@ -114,6 +122,12 @@ impl DebugState {
                     bandwidth_out
                 )))
                 .build();
+
+                ui.plot_lines(im_str!("RTT"), &self.rtt_history)
+                    .scale_max(100.0)
+                    .scale_min(0.0)
+                    .overlay_text(&ImString::new(format!("{:.2} ms", rtt)))
+                    .build();
 
                 ui.checkbox(
                     im_str!("Draw latest snapshot"),

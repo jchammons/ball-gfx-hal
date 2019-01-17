@@ -236,7 +236,9 @@ impl Game {
     ) -> O {
         let mut snapshots = self.snapshots.lock();
         let delayed_time = time -
-            Duration::from_float_secs((delay * server::SNAPSHOT_RATE) as f64);
+            Duration::from_float_secs(f64::from(
+                delay * server::SNAPSHOT_RATE,
+            ));
 
         // Get rid of old snapshots.
         while snapshots.len() > 1 && delayed_time > snapshots[1].1 {
