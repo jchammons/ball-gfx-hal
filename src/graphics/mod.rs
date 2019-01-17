@@ -1,7 +1,14 @@
 use arrayvec::ArrayVec;
 use gfx_hal::{
     buffer,
-    command::{ClearColor, ClearValue, OneShot, RenderPassInlineEncoder, CommandBuffer, Primary},
+    command::{
+        ClearColor,
+        ClearValue,
+        CommandBuffer,
+        OneShot,
+        Primary,
+        RenderPassInlineEncoder,
+    },
     format::{Aspects, ChannelType, Format, Swizzle},
     image::{self, Layout, SubresourceRange, ViewKind},
     memory::{Barrier, Dependencies, Properties, Requirements},
@@ -88,10 +95,13 @@ pub struct Graphics<B: Backend> {
     queue_groups: QueueGroups<B>,
     transfer_command_pool: CommandPool<B, gfx_hal::Transfer>,
     frame_command_pools:
-    ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
-    frame_cmd_buffers: ArrayVec<[CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>; MAX_FRAMES]>,
+        ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
+    frame_cmd_buffers: ArrayVec<
+        [CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>; MAX_FRAMES],
+    >,
     global_ubo_update_command_pool: CommandPool<B, gfx_hal::Graphics>,
-    global_ubo_update_cmd_buffer: CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>,
+    global_ubo_update_cmd_buffer:
+        CommandBuffer<B, gfx_hal::Graphics, OneShot, Primary>,
     swapchain_state: SwapchainState<B>,
     render_pass: B::RenderPass,
     global_ubo: B::Buffer,
@@ -482,10 +492,16 @@ impl<B: Backend> Graphics<B> {
         let frame_cmd_buffers = (0..MAX_FRAMES)
             .map(|frame| {
                 frame_command_pools[frame].acquire_command_buffer::<OneShot>()
-            }).collect();
+            })
+            .collect();
 
-        let mut global_ubo_update_command_pool = queue_groups.create_graphics_command_pool(&device, CommandPoolCreateFlags::empty());
-        let global_ubo_update_cmd_buffer = global_ubo_update_command_pool.acquire_command_buffer::<OneShot>();
+        let mut global_ubo_update_command_pool = queue_groups
+            .create_graphics_command_pool(
+                &device,
+                CommandPoolCreateFlags::empty(),
+            );
+        let global_ubo_update_cmd_buffer =
+            global_ubo_update_command_pool.acquire_command_buffer::<OneShot>();
         let global_ubo_update_fence = device.create_fence(true).unwrap();
 
         let swapchain_state = SwapchainState::new(
@@ -527,6 +543,10 @@ impl<B: Backend> Graphics<B> {
             first_frame: true,
             present_mode,
         }
+    }
+
+    pub fn present_mode(&self) -> PresentMode {
+        self.present_mode
     }
 
     pub fn set_present_mode(&mut self, present_mode: PresentMode) {
@@ -597,7 +617,9 @@ impl<B: Backend> Graphics<B> {
                 // Make sure the command pool doesn't get reset while the
                 // last update is still running. It's okay to block on
                 // this since it doesn't happen very often.
-                self.device.wait_for_fence(&self.global_ubo_update_fence, 10_000_000).unwrap();
+                self.device
+                    .wait_for_fence(&self.global_ubo_update_fence, 10_000_000)
+                    .unwrap();
                 self.device.reset_fence(&self.global_ubo_update_fence).unwrap();
                 // Reset the command buffer, so that it can be
                 // rerecorded with the new data.
@@ -653,7 +675,10 @@ impl<B: Backend> Graphics<B> {
 
                 cmd_buffer.finish();
 
-                self.queue_groups.graphics_queue().submit_nosemaphores(Some(&*cmd_buffer), Some(&self.global_ubo_update_fence));
+                self.queue_groups.graphics_queue().submit_nosemaphores(
+                    Some(&*cmd_buffer),
+                    Some(&self.global_ubo_update_fence),
+                );
             }
         }
 
@@ -720,7 +745,10 @@ impl<B: Backend> Graphics<B> {
 
             let submission = Submission {
                 command_buffers: Some(&*cmd_buffer),
-                wait_semaphores: Some((image_available_semaphore, PipelineStage::COLOR_ATTACHMENT_OUTPUT)),
+                wait_semaphores: Some((
+                    image_available_semaphore,
+                    PipelineStage::COLOR_ATTACHMENT_OUTPUT,
+                )),
                 signal_semaphores: Some(frame_finished_semaphore),
             };
             self.queue_groups
@@ -777,7 +805,9 @@ impl<B: Backend> Graphics<B> {
             device.destroy_fence(transfer_fence);
             swapchain_state.destroy(&device);
             device.destroy_command_pool(transfer_command_pool.into_raw());
-            device.destroy_command_pool(global_ubo_update_command_pool.into_raw());
+            device.destroy_command_pool(
+                global_ubo_update_command_pool.into_raw(),
+            );
             for command_pool in frame_command_pools.into_iter() {
                 device.destroy_command_pool(command_pool.into_raw());
             }

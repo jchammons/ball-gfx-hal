@@ -152,54 +152,50 @@ impl Game {
     ///
     /// `input_delay` is the time in seconds since the last received
     /// input used to generate the snapshot.
-    pub fn insert_snapshot(
-        &self,
-        snapshot: Snapshot,
-        _input_delay: f32,
-    ) {
+    pub fn insert_snapshot(&self, snapshot: Snapshot, _input_delay: f32) {
         // TODO!
-        
+
         // Remove the client's player from the snapshot, and reconcile
         // predicted state.
-        /*if let Some(player) = snapshot.players.get(&self.player_id) {
-            let input_buffer = self.input_buffer.lock();
-            // Update the predicted big ball position/velocity.
-            let mut ball = player.ball;
-            let mut cursor = player.cursor;
-            /*
-            // Fast-forward through all unacknowledged inputs. // 
-            for (input, dt) in input_buffer.inputs() { // 
-            // Only take input delay into account for the // 
-            // first input. // 
-            let dt = (dt - input_delay).max(0.0); // 
-            input_delay -= dt; // 
-            // 
-            debug!("replaying input: {:?} {}", input, dt); // 
-            for dt in step_dt(dt, 1.0 / 60.0) { // 
-            ball.tick(dt, cursor); // 
-        } // 
-            cursor = input.cursor; // 
-        } // 
-            let dt = // 
-            (input_buffer.delay(Instant::now()) - input_delay).max(0.0); // 
-            for dt in step_dt(dt, 1.0 / 60.0) { // 
-            ball.tick(dt, cursor); // 
-        } */
-            // Since the protocol only sends over the latest
-            // input, that's the only thing we need to predict.
-            /*let dt: f32 = input_buffer.inputs().map(|(_, dt)| dt).sum();
-            if let Some((input, _)) = input_buffer.inputs().last() {
-                //let dt = (dt - input_delay).max(0.0);
-                //let dt = input_delay;
-                cursor = input.cursor;
-                // TODO possibly just use calculus here instead
-                for dt in step_dt(dt, 1.0 / 60.0) {
-                    ball.tick(dt, cursor);
-                }
-            }*/
-            let mut predicted = self.predicted.lock();
-            predicted.ball = ball;
-        }*/
+        // if let Some(player) = snapshot.players.get(&self.player_id) {
+        // let input_buffer = self.input_buffer.lock();
+        // Update the predicted big ball position/velocity.
+        // let mut ball = player.ball;
+        // let mut cursor = player.cursor;
+        //
+        // Fast-forward through all unacknowledged inputs. //
+        // for (input, dt) in input_buffer.inputs() { //
+        // Only take input delay into account for the //
+        // first input. //
+        // let dt = (dt - input_delay).max(0.0); //
+        // input_delay -= dt; //
+        //
+        // debug!("replaying input: {:?} {}", input, dt); //
+        // for dt in step_dt(dt, 1.0 / 60.0) { //
+        // ball.tick(dt, cursor); //
+        // } //
+        // cursor = input.cursor; //
+        // } //
+        // let dt = //
+        // (input_buffer.delay(Instant::now()) - input_delay).max(0.0); //
+        // for dt in step_dt(dt, 1.0 / 60.0) { //
+        // ball.tick(dt, cursor); //
+        // }
+        // Since the protocol only sends over the latest
+        // input, that's the only thing we need to predict.
+        // let dt: f32 = input_buffer.inputs().map(|(_, dt)| dt).sum();
+        // if let Some((input, _)) = input_buffer.inputs().last() {
+        // let dt = (dt - input_delay).max(0.0);
+        // let dt = input_delay;
+        // cursor = input.cursor;
+        // TODO possibly just use calculus here instead
+        // for dt in step_dt(dt, 1.0 / 60.0) {
+        // ball.tick(dt, cursor);
+        // }
+        // }
+        // let mut predicted = self.predicted.lock();
+        // predicted.ball = ball;
+        // }
 
         let mut snapshots = self.snapshots.lock();
         snapshots.push_back((snapshot, Instant::now()));
