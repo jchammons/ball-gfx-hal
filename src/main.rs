@@ -1,4 +1,4 @@
-#![feature(duration_float, range_contains)]
+#![feature(duration_float, range_contains, exact_size_is_empty, copy_within)]
 
 extern crate gfx_backend_vulkan as backend;
 use ctrlc;
@@ -103,7 +103,7 @@ fn run_gui() {
 
         let ui = imgui_winit.frame(&mut imgui, &window);
         debug.ui(&ui, &mut graphics, &mut renderdoc, frame_time);
-        game_state.ui(&ui);
+        game_state.ui(&ui, &debug);
 
         let _ = graphics.draw_frame(ui, |mut ctx| {
             game_state.draw(now, &mut circle_rend, &mut ctx, &debug);

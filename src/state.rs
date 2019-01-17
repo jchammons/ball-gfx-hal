@@ -66,10 +66,12 @@ pub enum GameState {
 impl ConnectingState {
     fn host(
         addr: SocketAddr,
+        debug: &DebugState,
         cursor: Point2<f32>,
     ) -> Result<ConnectingState, networking::Error> {
         let (server, _) = server::host(addr)?;
-        let (client, connecting) = client::connect(addr, cursor)?;
+        let (client, connecting) =
+            client::connect(addr, debug.network_tx.clone(), cursor)?;
         Ok(ConnectingState {
             server: Some(server),
             client,
@@ -79,9 +81,11 @@ impl ConnectingState {
 
     fn connect(
         addr: SocketAddr,
+        debug: &DebugState,
         cursor: Point2<f32>,
     ) -> Result<ConnectingState, networking::Error> {
-        let (client, connecting) = client::connect(addr, cursor)?;
+        let (client, connecting) =
+            client::connect(addr, debug.network_tx.clone(), cursor)?;
         Ok(ConnectingState {
             server: None,
             client,
@@ -199,7 +203,7 @@ impl GameState {
         }
     }
 
-    pub fn ui<'a>(&mut self, ui: &Ui<'a>) {
+    pub fn ui<'a>(&mut self, ui: &Ui<'a>, debug: &DebugState) {
         match self {
             GameState::MainMenu {
                 ref mut server_addr,
@@ -220,7 +224,7 @@ impl GameState {
                             match server_addr.to_str().parse() {
                                 Ok(addr) => {
                                     match ConnectingState::connect(
-                                        addr, *cursor,
+                                        addr, debug, *cursor,
                                     ) {
                                         Ok(state) => *connecting = Some(state),
                                         Err(err) => {
@@ -250,7 +254,9 @@ impl GameState {
                         if ui.small_button(im_str!("Host server")) {
                             match server_addr_host.to_str().parse() {
                                 Ok(addr) => {
-                                    match ConnectingState::host(addr, *cursor) {
+                                    match ConnectingState::host(
+                                        addr, debug, *cursor,
+                                    ) {
                                         Ok(state) => *connecting = Some(state),
                                         Err(err) => {
                                             error!(
