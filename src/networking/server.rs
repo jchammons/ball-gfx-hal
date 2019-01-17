@@ -9,7 +9,7 @@ use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
-use crate::networking::{Error, MAX_PACKET_SIZE};
+use crate::networking::{Error, RttEstimator, MAX_PACKET_SIZE, PING_RATE};
 use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
@@ -33,6 +33,7 @@ const SHUTDOWN: Token = Token(2);
 enum TimeoutState {
     SendTick,
     GameTick,
+    Ping,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +50,8 @@ pub enum ServerPacket {
         /// since it was received.
         last_input: (u32, f32),
     },
+    Ping,
+    Pong(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +66,7 @@ struct Client {
     connection: Connection,
     /// Sequence id of the last input, and the time it was received.
     last_input: (u32, Instant),
+    rtt: RttEstimator,
 }
 
 /// Contains a message and a list of clients to send the message to.
@@ -87,6 +91,7 @@ pub struct Server {
     game: Game,
     send_tick: Interval,
     game_tick: Interval,
+    ping: Interval,
     poll: Poll,
     _shutdown: Registration,
 }
@@ -132,20 +137,23 @@ impl Packet {
         addr: SocketAddr,
         client: &mut Client,
         contents: &P,
-    ) -> Result<Packet, Error> {
+    ) -> Result<(Packet, u32), Error> {
         // Write header and contents
         let size = bincode::serialized_size(contents)
             .map_err(Error::serialize)? as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
-        client.connection.send_header(&mut packet)?;
+        let sequence = client.connection.send_header(&mut packet)?;
         bincode::serialize_into(&mut packet, contents)
             .map_err(Error::serialize)?;
 
-        Ok(Packet {
-            client: addr,
-            remaining: Vec::new(),
-            packet,
-        })
+        Ok((
+            Packet {
+                client: addr,
+                remaining: Vec::new(),
+                packet,
+            },
+            sequence,
+        ))
     }
 
     /// Poossibly constructs a new packet, but returns `None` if
@@ -221,6 +229,9 @@ impl EventHandler for Server {
                         TimeoutState::GameTick => {
                             self.game_tick();
                         },
+                        TimeoutState::Ping => {
+                            self.send_ping();
+                        },
                     }
                 }
             },
@@ -255,11 +266,14 @@ impl Server {
         // Set timeout for the first tick. All subsequent ticks will
         // be generated from Server::send_tick.
         let send_tick =
-            Interval::new(Duration::from_float_secs(SNAPSHOT_RATE as f64));
+            Interval::new(Duration::from_float_secs(f64::from(SNAPSHOT_RATE)));
         timer.set_timeout(send_tick.interval(), TimeoutState::SendTick);
         let game_tick =
-            Interval::new(Duration::from_float_secs(TICK_RATE as f64));
+            Interval::new(Duration::from_float_secs(f64::from(TICK_RATE)));
         timer.set_timeout(game_tick.interval(), TimeoutState::GameTick);
+        let ping =
+            Interval::new(Duration::from_float_secs(f64::from(PING_RATE)));
+        timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
         Ok(Server {
             socket,
@@ -270,6 +284,7 @@ impl Server {
             game: Game::default(),
             send_tick,
             game_tick,
+            ping,
             poll,
             _shutdown: shutdown,
         })
@@ -345,6 +360,31 @@ impl Server {
         }
     }
 
+    fn send_ping(&mut self) {
+        let now = Instant::now();
+        let (_, interval) = self.ping.next(now);
+        self.timer.set_timeout(interval, TimeoutState::Ping);
+
+        for (&addr, client) in self.clients.iter_mut() {
+            let (packet, sequence) = match Packet::single_client(
+                addr,
+                client,
+                &ServerPacket::Ping,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    error!(
+                        "error initializing ping packet for client {}: {}",
+                        addr, err
+                    );
+                    continue;
+                },
+            };
+            self.send_queue.push_back(packet);
+            client.rtt.ping(sequence, now);
+        }
+    }
+
     fn send_tick(&mut self) {
         // Send a snapshot to all connected clients.
         let now = Instant::now();
@@ -363,6 +403,7 @@ impl Server {
 
             // Don't stop on encountering errors.
             Packet::single_client(addr, client, &packet)
+                .map(|(packet, _)| packet)
                 .map_err(|err| {
                     error!("error sending tick to {}: {}", &addr, err);
                 })
@@ -400,6 +441,7 @@ impl Server {
                 player: player_id,
                 connection,
                 last_input: (0, Instant::now()),
+                rtt: RttEstimator::default(),
             },
         );
 
@@ -450,7 +492,9 @@ impl Server {
         match self.clients.get_mut(&addr) {
             Some(client) => {
                 // Existing player.
-                match client.connection.decode(Cursor::new(packet))?.0 {
+                let (packet, sequence, _) =
+                    client.connection.decode(Cursor::new(packet))?;
+                match packet {
                     ClientPacket::Input {
                         input,
                         sequence,
@@ -466,6 +510,19 @@ impl Server {
                     },
                     ClientPacket::Disconnect => {
                         self.remove_client(&addr)?;
+                    },
+                    ClientPacket::Ping => {
+                        self.send_queue.push_back(
+                            Packet::single_client(
+                                addr,
+                                client,
+                                &ServerPacket::Pong(sequence),
+                            )?
+                            .0,
+                        );
+                    },
+                    ClientPacket::Pong(sequence) => {
+                        client.rtt.pong(sequence);
                     },
                 }
             },

@@ -1,5 +1,6 @@
 use failure::{Backtrace, Fail};
 use std::io;
+use std::time::Instant;
 
 pub mod client;
 pub mod connection;
@@ -10,6 +11,47 @@ pub mod tick;
 /// MTU will probably never be bigger than this, so if a received
 /// packet is bigger, there are probably other problems.
 pub const MAX_PACKET_SIZE: usize = 4096;
+
+/// Rate at which both the client and the server send out pings.
+pub const PING_RATE: f32 = 0.5;
+
+/// System to estimate rtt for a connection by periodically sending
+/// pings and recording the time until a response is received.
+#[derive(Default, Debug)]
+pub struct RttEstimator {
+    /// Sequence id and timestamp of the last sent ping.
+    ///
+    /// This gets set back to `None` once a pong is received.
+    last_ping: Option<(u32, Instant)>,
+    rtt: Option<f32>,
+}
+
+impl RttEstimator {
+    /// Gets the estimated RTT, or `None` if there have been no
+    /// samples yet.
+    pub fn rtt(&self) -> Option<f32> {
+        self.rtt
+    }
+
+    /// Record a sent ping.
+    pub fn ping(&mut self, sequence: u32, now: Instant) {
+        self.last_ping = Some((sequence, now));
+    }
+
+    /// Record a pong response.
+    pub fn pong(&mut self, sequence: u32) {
+        if let Some((expected, time)) = self.last_ping {
+            if sequence == expected {
+                let sample = time.elapsed().as_float_secs() as f32;
+                self.rtt = Some(match self.rtt {
+                    Some(rtt) => 0.875 * rtt + 0.125 * sample,
+                    None => sample,
+                });
+                self.last_ping = None;
+            }
+        }
+    }
+}
 
 #[derive(Fail, Debug)]
 pub enum Error {
@@ -37,6 +79,8 @@ pub enum Error {
     PollRegister(#[cause] io::Error, Backtrace),
     #[fail(display = "initializing poll failed: {} {}", _0, _1)]
     PollInit(#[cause] io::Error, Backtrace),
+    #[fail(display = "connection is shutting down")]
+    ShuttingDown,
 }
 
 impl Error {
