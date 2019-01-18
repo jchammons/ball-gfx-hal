@@ -52,13 +52,14 @@ pub enum GameState {
     MainMenu {
         server_addr: ImString,
         server_addr_host: ImString,
-        connecting: Option<ConnectingState>,
         cursor: Point2<f32>,
+        connecting: Option<ConnectingState>,
     },
     InGame {
         server: Option<ServerHandle>,
         client: ClientHandle,
         game: Arc<Game>,
+        cursor: Point2<f32>,
         locked: bool,
     },
 }
@@ -137,6 +138,7 @@ impl GameState {
             GameState::InGame {
                 ref game,
                 ref mut locked,
+                ref mut cursor,
                 ..
             } => {
                 match event {
@@ -144,7 +146,8 @@ impl GameState {
                         position,
                         ..
                     } if !*locked => {
-                        game.update_cursor(cursor_pos(position));
+                        *cursor = cursor_pos(position);
+                        game.update_cursor(*cursor);
                     },
                     WindowEvent::MouseInput {
                         state,
@@ -168,6 +171,7 @@ impl GameState {
         match self {
             GameState::MainMenu {
                 ref mut connecting,
+                ref cursor,
                 ..
             } => {
                 let done = connecting
@@ -179,6 +183,7 @@ impl GameState {
                         transition = Some(GameState::InGame {
                             server: connecting.server,
                             client: connecting.client,
+                            cursor: *cursor,
                             game,
                             locked: false,
                         });
@@ -300,6 +305,7 @@ impl GameState {
             },
             GameState::InGame {
                 game,
+                cursor,
                 ..
             } => {
                 // TODO use the z-buffer to reduce overdraw here
@@ -321,6 +327,7 @@ impl GameState {
                 }
                 game.interpolated_players(
                     now,
+                    *cursor,
                     debug.interpolation_delay,
                     |players| {
                         let circles = players
