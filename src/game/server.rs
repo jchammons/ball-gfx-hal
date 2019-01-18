@@ -8,8 +8,9 @@ use crate::game::{
     Snapshot,
     StaticPlayerState,
     BALL_RADIUS,
+    CURSOR_RADIUS,
 };
-use log::{debug, trace};
+use log::{debug, info, trace};
 use nalgebra::Point2;
 use ord_subset::OrdSubsetIterExt;
 use palette::{LabHue, Lch};
@@ -90,7 +91,7 @@ impl Game {
             Some(player) => player,
             None => return false,
         };
-        player.state.cursor = cursor;
+        player.state.set_cursor(cursor);
         if self.round == RoundState::Waiting {
             player.state.ball = Ball::starting(cursor);
         }
@@ -162,7 +163,7 @@ impl Game {
                 }
             }
 
-            // Process collisions
+            // Process collisions between balls.
             for (id_a, id_b, penetration, a_to_b, vel) in collisions.into_iter()
             {
                 let bounce = |player: &mut Player, sign| {
@@ -212,6 +213,33 @@ impl Game {
                     // Repeat remaining movement in the new direction.
                     *position += velocity.normalize() * penetration_vel;
                 }
+            }
+
+            // Check for collisions with cursor.
+            let mut collisions = SmallVec::<[_; 2]>::new();
+            for (&id, player) in self.players.iter() {
+                if let Some(ref cursor) = player.state.cursor {
+                    for (&id_ball, player_ball) in self.players.iter() {
+                        if id == id_ball {
+                            // Don't let players kill themselves.
+                            // TODO make this configurable
+                            continue;
+                        }
+                        let ball = player_ball.state.ball.position;
+                        let distance_sq =
+                            nalgebra::distance_squared(&ball, cursor);
+                        let min_distance = BALL_RADIUS + CURSOR_RADIUS;
+                        if distance_sq < min_distance * min_distance {
+                            info!("{} killed {}", id_ball, id);
+                            collisions.push(id);
+                        }
+                    }
+                }
+            }
+
+            // Process collisions with cursor.
+            for id in collisions.into_iter() {
+                self.players.get_mut(&id).unwrap().state.cursor = None;
             }
         }
     }

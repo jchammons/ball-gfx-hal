@@ -30,7 +30,12 @@ impl<'a> Interpolate for &'a PlayerState {
 
     fn interpolate(self, other: &'a PlayerState, alpha: f32) -> PlayerState {
         PlayerState {
-            cursor: self.cursor.interpolate(other.cursor, alpha),
+            cursor: self.cursor.map(|a| {
+                match other.cursor {
+                    Some(b) => a.interpolate(b, alpha),
+                    None => a,
+                }
+            }),
             ball: self.ball.interpolate(&other.ball, alpha),
         }
     }
