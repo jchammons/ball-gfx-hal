@@ -201,4 +201,9 @@ impl PlayerState {
     pub fn tick(&mut self, dt: f32) {
         self.ball.tick(dt, self.cursor);
     }
+
+    /// Returns whether the player is still alive.
+    pub fn alive(&self) -> bool {
+        self.cursor.is_some()
+    }
 }

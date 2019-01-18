@@ -283,11 +283,6 @@ impl Server {
             Interval::new(Duration::from_float_secs(f64::from(PING_RATE)));
         timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
-        timer.set_timeout(
-            Duration::from_float_secs(f64::from(ROUND_WAITING_TIME)),
-            TimeoutState::StartRound,
-        );
-
         Ok(Server {
             socket,
             timer,
@@ -454,6 +449,15 @@ impl Server {
         handshake: &ClientHandshake,
     ) -> Result<(), Error> {
         info!("new player from {}", addr);
+
+        if self.game.players.is_empty() {
+            // This is the first player.
+            self.timer.set_timeout(
+                Duration::from_float_secs(f64::from(ROUND_WAITING_TIME)),
+                TimeoutState::StartRound,
+            );
+        }
+
         let (player_id, player) =
             self.game.add_player(clamp_cursor(handshake.cursor));
         let static_state = player.static_state().clone();
