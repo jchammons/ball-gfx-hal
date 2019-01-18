@@ -1,5 +1,4 @@
 use crate::game::{
-    clamp_cursor,
     AtomicRoundState,
     GetPlayer,
     Input,
@@ -281,10 +280,8 @@ impl Game {
             None => InterpolatedSnapshot::new(0.0, old, old),
         };
 
-        let predicted = PlayerState {
-            cursor: clamp_cursor(cursor),
-            ..*snapshot.get(self.player_id).unwrap()
-        };
+        let mut predicted = *snapshot.get(self.player_id).unwrap();
+        predicted.set_cursor(cursor);
 
         let players = self.players.lock();
         let players = Players {

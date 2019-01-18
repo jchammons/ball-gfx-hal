@@ -1,10 +1,10 @@
 use crate::graphics::Circle;
-use arrayvec::ArrayVec;
 use nalgebra::{self, Point2, Vector2};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use palette::LinSrgb;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::iter;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,7 +62,8 @@ pub struct StaticPlayerState {
 /// Dynamic player state that is likely to change between frames.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerState {
-    pub cursor: Point2<f32>,
+    /// Position of the cursor, if the player is still alive.
+    pub cursor: Option<Point2<f32>>,
     pub ball: Ball,
 }
 
@@ -76,23 +77,28 @@ pub trait GetPlayer {
     fn static_state(self) -> Self::StaticState;
 
     /// Generates a set of circles to draw this player.
-    fn draw(self, scale: f32) -> ArrayVec<[Circle; 2]>
+    fn draw(self, scale: f32) -> SmallVec<[Circle; 2]>
     where
         Self: Sized + Copy,
     {
         let state = self.state();
         let color = self.static_state().color;
-        let cursor = Circle {
-            center: state.cursor * scale,
-            radius: CURSOR_RADIUS * scale,
-            color,
-        };
-        let ball = Circle {
+        let mut circles = SmallVec::new();
+        // Ball
+        circles.push(Circle {
             center: state.ball.position * scale,
             radius: BALL_RADIUS * scale,
             color,
-        };
-        ArrayVec::from([cursor, ball])
+        });
+        if let Some(cursor) = state.cursor {
+            // Cursor, if alive
+            circles.push(Circle {
+                center: cursor * scale,
+                radius: CURSOR_RADIUS * scale,
+                color,
+            });
+        }
+        circles
     }
 }
 
@@ -153,9 +159,11 @@ impl Ball {
 
     /// Steps the ball forward in time using a provided cursor
     /// location.
-    pub fn tick(&mut self, dt: f32, cursor: Point2<f32>) {
-        let displacement = self.position - cursor;
-        self.velocity -= SPRING_CONSTANT * displacement * dt;
+    pub fn tick(&mut self, dt: f32, cursor: Option<Point2<f32>>) {
+        if let Some(cursor) = cursor {
+            let displacement = self.position - cursor;
+            self.velocity -= SPRING_CONSTANT * displacement * dt;
+        }
         self.position += self.velocity * dt;
     }
 }
@@ -177,8 +185,15 @@ impl PlayerState {
     /// the origin than the cursor.
     pub fn new(cursor: Point2<f32>) -> PlayerState {
         PlayerState {
-            cursor,
+            cursor: Some(cursor),
             ball: Ball::starting(cursor),
+        }
+    }
+
+    /// Sets the cursor position, if the player is still alive.
+    pub fn set_cursor(&mut self, cursor: Point2<f32>) {
+        if let Some(ref mut alive_cursor) = self.cursor {
+            *alive_cursor = cursor;
         }
     }
 

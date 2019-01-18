@@ -1,5 +1,5 @@
 use crate::debug::DebugState;
-use crate::game::{client::Game, GetPlayer};
+use crate::game::{clamp_cursor, client::Game, GetPlayer};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
@@ -321,7 +321,7 @@ impl GameState {
                 }
                 game.interpolated_players(
                     now,
-                    *cursor,
+                    clamp_cursor(*cursor),
                     debug.interpolation_delay,
                     |players| {
                         let circles = players
