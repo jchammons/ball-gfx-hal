@@ -472,6 +472,9 @@ impl Client {
                         info!("player {} left", id);
                         game.remove_player(id);
                     },
+                    ServerPacket::RoundState(round) => {
+                        game.round.store(round);
+                    },
                     ServerPacket::Pong(sequence) => {
                         rtt.pong(sequence);
                     },

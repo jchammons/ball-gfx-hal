@@ -3,8 +3,10 @@ use crate::game::{
     server::Game,
     GetPlayer,
     PlayerId,
+    RoundState,
     Snapshot,
     StaticPlayerState,
+    ROUND_WAITING_TIME,
 };
 use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
@@ -35,6 +37,7 @@ enum TimeoutState {
     SendTick,
     GameTick,
     Ping,
+    StartRound,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +54,7 @@ pub enum ServerPacket {
         /// since it was received.
         last_input: (u32, f32),
     },
+    RoundState(RoundState),
     Ping,
     Pong(u32),
 }
@@ -224,6 +228,9 @@ impl EventHandler for Server {
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
+                        TimeoutState::StartRound => {
+                            self.start_round();
+                        },
                         TimeoutState::SendTick => {
                             self.send_tick();
                         },
@@ -275,6 +282,11 @@ impl Server {
         let ping =
             Interval::new(Duration::from_float_secs(f64::from(PING_RATE)));
         timer.set_timeout(ping.interval(), TimeoutState::Ping);
+
+        timer.set_timeout(
+            Duration::from_float_secs(f64::from(ROUND_WAITING_TIME)),
+            TimeoutState::StartRound,
+        );
 
         Ok(Server {
             socket,
@@ -361,6 +373,15 @@ impl Server {
         }
     }
 
+    fn start_round(&mut self) {
+        self.game.start_round();
+        if let Err(err) =
+            self.broadcast(&ServerPacket::RoundState(RoundState::Started))
+        {
+            error!("error sending round state packet: {}", err);
+        }
+    }
+
     fn send_ping(&mut self) {
         let now = Instant::now();
         let (_, interval) = self.ping.next(now);
@@ -433,7 +454,8 @@ impl Server {
         handshake: &ClientHandshake,
     ) -> Result<(), Error> {
         info!("new player from {}", addr);
-        let (player_id, player) = self.game.add_player(handshake.cursor);
+        let (player_id, player) =
+            self.game.add_player(clamp_cursor(handshake.cursor));
         let static_state = player.static_state().clone();
         // Now start processing this client.
         self.clients.insert(
@@ -500,15 +522,11 @@ impl Server {
                         input,
                         sequence,
                     } => {
-                        if let Some(player) =
-                            self.game.player_mut(client.player)
-                        {
-                            if sequence > client.last_input.0 {
-                                player.state.cursor =
-                                    clamp_cursor(input.cursor);
-                                client.last_input = (sequence, Instant::now());
-                            }
-                        }
+                        self.game.set_player_cursor(
+                            client.player,
+                            clamp_cursor(input.cursor),
+                        );
+                        client.last_input = (sequence, Instant::now());
                     },
                     ClientPacket::Disconnect => {
                         self.remove_client(&addr)?;

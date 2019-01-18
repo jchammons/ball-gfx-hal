@@ -1,5 +1,6 @@
 use crate::game::{
     clamp_cursor,
+    AtomicRoundState,
     GetPlayer,
     Input,
     InputBuffer,
@@ -35,6 +36,7 @@ pub struct Players<'a, S> {
 pub struct Game {
     players: Mutex<HashMap<PlayerId, StaticPlayerState>>,
     snapshots: Mutex<VecDeque<(Snapshot, Instant)>>,
+    pub round: AtomicRoundState,
     pub input_buffer: Mutex<InputBuffer>,
     /// Player id for this client.
     player_id: PlayerId,
@@ -124,6 +126,7 @@ impl Game {
             input_buffer: Mutex::new(InputBuffer::new(Input {
                 cursor,
             })),
+            round: AtomicRoundState::default(),
             player_id,
             // predicted: Mutex::new(PlayerState::new(clamp_cursor(cursor))),
         }

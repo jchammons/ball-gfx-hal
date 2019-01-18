@@ -1,11 +1,13 @@
 use crate::graphics::Circle;
 use arrayvec::ArrayVec;
-use nalgebra::{Point2, Vector2};
-use num_traits::Zero;
+use nalgebra::{self, Point2, Vector2};
+use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive};
 use palette::LinSrgb;
 use serde::{Deserialize, Serialize};
 use std::iter;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod client;
 pub mod input;
@@ -17,9 +19,32 @@ pub use self::snapshot::*;
 
 pub const BALL_RADIUS: f32 = 0.15;
 pub const CURSOR_RADIUS: f32 = 0.05;
+pub const ROUND_WAITING_TIME: f32 = 3.0;
 const SPRING_CONSTANT: f32 = 8.0;
 const BALL_START_DISTANCE: f32 = 0.3;
+const BALL_START_SPEED: f32 = 1.0;
 pub type PlayerId = u16;
+
+/// Different stages of a round.
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    FromPrimitive,
+    ToPrimitive,
+    Serialize,
+    Deserialize,
+)]
+pub enum RoundState {
+    Waiting,
+    Started,
+}
+
+/// A small wrapper around [RoundState] with thread safe mutability.
+#[derive(Debug)]
+pub struct AtomicRoundState(AtomicUsize);
 
 /// Dynamic state for the large ball.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +96,34 @@ pub trait GetPlayer {
     }
 }
 
+impl Default for RoundState {
+    fn default() -> RoundState {
+        RoundState::Waiting
+    }
+}
+
+impl Default for AtomicRoundState {
+    fn default() -> AtomicRoundState {
+        AtomicRoundState::from(RoundState::Waiting)
+    }
+}
+
+impl From<RoundState> for AtomicRoundState {
+    fn from(round: RoundState) -> AtomicRoundState {
+        AtomicRoundState(AtomicUsize::new(round.to_usize().unwrap()))
+    }
+}
+
+impl AtomicRoundState {
+    pub fn load(&self) -> RoundState {
+        RoundState::from_usize(self.0.load(Ordering::Relaxed)).unwrap()
+    }
+
+    pub fn store(&self, round: RoundState) {
+        self.0.store(round.to_usize().unwrap(), Ordering::Relaxed);
+    }
+}
+
 /// Steps over a given time interval in chunks of at most a specified duration.
 ///
 /// This is useful for things that will be stable at small timesteps,
@@ -82,6 +135,22 @@ pub fn step_dt(dt: f32, max: f32) -> impl Iterator<Item = f32> {
 }
 
 impl Ball {
+    /// Gets the starting state of the ball for a given starting
+    /// cursor position.
+    pub fn starting(cursor: Point2<f32>) -> Ball {
+        let cursor_dir = (cursor - Point2::origin()).normalize();
+        let mut position = cursor + cursor_dir * BALL_START_DISTANCE;
+        if nalgebra::distance(&position, &Point2::origin()) > 1.0 - BALL_RADIUS
+        {
+            position.coords.normalize_mut();
+            position *= 1.0 - BALL_RADIUS;
+        }
+        Ball {
+            position,
+            velocity: cursor_dir * BALL_START_SPEED,
+        }
+    }
+
     /// Steps the ball forward in time using a provided cursor
     /// location.
     pub fn tick(&mut self, dt: f32, cursor: Point2<f32>) {
@@ -109,12 +178,7 @@ impl PlayerState {
     pub fn new(cursor: Point2<f32>) -> PlayerState {
         PlayerState {
             cursor,
-            ball: Ball {
-                position: cursor +
-                    (cursor - Point2::origin()).normalize() *
-                        BALL_START_DISTANCE,
-                velocity: Vector2::zero(),
-            },
+            ball: Ball::starting(cursor),
         }
     }
 

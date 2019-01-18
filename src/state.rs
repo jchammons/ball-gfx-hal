@@ -12,7 +12,6 @@ use log::{error, warn};
 use nalgebra::Point2;
 use palette::LinSrgb;
 use std::iter;
-use std::marker::PhantomData;
 use std::mem;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,12 +32,7 @@ fn bounds_circle() -> Circle {
     Circle {
         center: Point2::new(0.0, 0.0),
         radius: SCALE,
-        color: LinSrgb {
-            red: 1.0,
-            green: 1.0,
-            blue: 1.0,
-            standard: PhantomData,
-        },
+        color: LinSrgb::new(1.0, 1.0, 1.0),
     }
 }
 
