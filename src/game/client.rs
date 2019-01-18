@@ -1,4 +1,5 @@
 use crate::game::{
+    clamp_cursor,
     step_dt,
     GetPlayer,
     Input,
@@ -113,7 +114,7 @@ impl Game {
                 cursor,
             })),
             player_id,
-            predicted: Mutex::new(PlayerState::new(cursor)),
+            predicted: Mutex::new(PlayerState::new(clamp_cursor(cursor))),
         }
     }
 
@@ -127,7 +128,7 @@ impl Game {
 
     /// Updates the cursor position for this client player.
     pub fn update_cursor(&self, cursor: Point2<f32>) {
-        self.predicted.lock().cursor = cursor;
+        self.predicted.lock().cursor = clamp_cursor(cursor);
         self.input_buffer.lock().store_input(
             Input {
                 cursor,

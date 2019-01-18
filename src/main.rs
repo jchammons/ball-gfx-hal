@@ -106,8 +106,8 @@ fn run_gui() {
                                 if input.state == ElementState::Pressed =>
                             {
                                 debug.show_window = !debug.show_window;
-                            },
-                            _ => ()
+                            }
+                            _ => (),
                         }
                     },
                     _ => (),

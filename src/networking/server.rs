@@ -1,4 +1,5 @@
 use crate::game::{
+    clamp_cursor,
     server::Game,
     GetPlayer,
     PlayerId,
@@ -503,7 +504,8 @@ impl Server {
                             self.game.player_mut(client.player)
                         {
                             if sequence > client.last_input.0 {
-                                player.state.cursor = input.cursor;
+                                player.state.cursor =
+                                    clamp_cursor(input.cursor);
                                 client.last_input = (sequence, Instant::now());
                             }
                         }
