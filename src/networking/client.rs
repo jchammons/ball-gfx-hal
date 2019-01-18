@@ -473,6 +473,7 @@ impl Client {
                         game.remove_player(id);
                     },
                     ServerPacket::RoundState(round) => {
+                        info!("transitioning to state: {:?}", round);
                         game.round.store(round);
                     },
                     ServerPacket::Pong(sequence) => {

@@ -42,7 +42,7 @@ pub struct Player {
 
 #[derive(Clone, Debug, Default)]
 pub struct Game {
-    players: HashMap<PlayerId, Player>,
+    pub players: HashMap<PlayerId, Player>,
     round: RoundState,
     next_id: PlayerId,
 }
@@ -64,6 +64,7 @@ impl Game {
     /// Starts the current round.
     pub fn start_round(&mut self) {
         self.round = RoundState::Started;
+        info!("starting round");
     }
 
     /// Returns an iterator over the players.
@@ -188,8 +189,11 @@ impl Game {
                 bounce(self.players.get_mut(&id_b).unwrap(), 1.0);
             }
 
+            let mut deaths = SmallVec::<[_; 2]>::new();
+
             // Check for collisions with walls.
             for (&id, player) in self.players.iter_mut() {
+                let alive = player.state.alive();
                 let position = &mut player.state.ball.position;
                 let velocity = &mut player.state.ball.velocity;
 
@@ -199,6 +203,10 @@ impl Game {
                     let distance = distance_sq.sqrt();
                     let normal = -(*position - Point2::origin()) / distance;
                     let penetration = distance - (1.0 - BALL_RADIUS) + 0.001;
+                    if alive {
+                        info!("{} hit the wall and died", id);
+                        deaths.push(id);
+                    }
                     debug!(
                         "collision between {} and boundary circle ({})",
                         id, penetration
@@ -216,7 +224,6 @@ impl Game {
             }
 
             // Check for collisions with cursor.
-            let mut collisions = SmallVec::<[_; 2]>::new();
             for (&id, player) in self.players.iter() {
                 if let Some(ref cursor) = player.state.cursor {
                     for (&id_ball, player_ball) in self.players.iter() {
@@ -231,14 +238,14 @@ impl Game {
                         let min_distance = BALL_RADIUS + CURSOR_RADIUS;
                         if distance_sq < min_distance * min_distance {
                             info!("{} killed {}", id_ball, id);
-                            collisions.push(id);
+                            deaths.push(id);
                         }
                     }
                 }
             }
 
             // Process collisions with cursor.
-            for id in collisions.into_iter() {
+            for id in deaths.into_iter() {
                 self.players.get_mut(&id).unwrap().state.cursor = None;
             }
         }
