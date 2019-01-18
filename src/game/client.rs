@@ -1,6 +1,5 @@
 use crate::game::{
     clamp_cursor,
-    step_dt,
     GetPlayer,
     Input,
     InputBuffer,
@@ -15,13 +14,14 @@ use crate::networking::server;
 use log::warn;
 use nalgebra::Point2;
 use parking_lot::Mutex;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct Player<'a> {
     static_state: &'a StaticPlayerState,
-    state: PlayerState,
+    state: Cow<'a, PlayerState>,
 }
 
 /// Constructs an iterator over all complete players with a given
@@ -29,7 +29,7 @@ pub struct Player<'a> {
 pub struct Players<'a, S> {
     players: &'a HashMap<PlayerId, StaticPlayerState>,
     snapshot: S,
-    // predicted: (PlayerId, PlayerState),
+    predicted: Option<(PlayerId, PlayerState)>,
 }
 
 pub struct Game {
@@ -38,8 +38,8 @@ pub struct Game {
     pub input_buffer: Mutex<InputBuffer>,
     /// Player id for this client.
     player_id: PlayerId,
-    /// Predicted state of this client.
-    predicted: Mutex<PlayerState>,
+    /* /// Predicted state of this client.
+     * cursor: Mutex<Point2<f32>>, */
 }
 
 impl<'a, 'b> GetPlayer for &'b Player<'a> {
@@ -55,7 +55,7 @@ impl<'a, 'b> GetPlayer for &'b Player<'a> {
     }
 }
 
-impl<'a: 'b, 'b, S: SnapshotView<'b>> Players<'a, S> {
+impl<'a, S: SnapshotView<'a>> Players<'a, S> {
     /// This doesn't use the `IntoIterator` trait, since it needs impl
     /// Trait.
     ///
@@ -64,37 +64,48 @@ impl<'a: 'b, 'b, S: SnapshotView<'b>> Players<'a, S> {
     #[allow(clippy::should_implement_trait)]
     pub fn into_iter(
         self,
-    ) -> impl Iterator<Item = (PlayerId, Player<'a>)> + 'b {
+    ) -> impl Iterator<Item = (PlayerId, Player<'a>)> + 'a {
         let Players {
             players,
-            // predicted,
+            predicted,
             snapshot,
         } = self;
 
-        // let predicted = (
-        // predicted.0,
-        // Player {
-        // static_state: &players[&predicted.0],
-        // state: predicted.1,
-        // },
-        // );
+        let predicted_id = predicted.map(|(id, _)| id);
+        let predicted = predicted.map(|(id, state)| {
+            (
+                id,
+                Player {
+                    static_state: &players[&id],
+                    state: Cow::Owned(state),
+                },
+            )
+        });
 
-        snapshot.players().filter_map(move |(id, state)| {
-            // Only handle players who also have static state
-            // stored. If the static state isn't there, the player
-            // must have already been removed, but we haven't received
-            // the new snapshot.
-            players.get(&id).map(|static_state| {
-                (
-                    id,
-                    Player {
-                        static_state,
-                        state,
-                    },
-                )
+        snapshot
+            .players()
+            .filter_map(move |(id, state)| {
+                if predicted_id
+                    .map(|predicted_id| id == predicted_id)
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                // Only handle players who also have static state
+                // stored. If the static state isn't there, the player
+                // must have already been removed, but we haven't received
+                // the new snapshot.
+                players.get(&id).map(|static_state| {
+                    (
+                        id,
+                        Player {
+                            static_state,
+                            state,
+                        },
+                    )
+                })
             })
-        })
-        //.chain(iter::once(predicted))
+            .chain(predicted)
     }
 }
 
@@ -114,21 +125,21 @@ impl Game {
                 cursor,
             })),
             player_id,
-            predicted: Mutex::new(PlayerState::new(clamp_cursor(cursor))),
+            // predicted: Mutex::new(PlayerState::new(clamp_cursor(cursor))),
         }
     }
 
     /// Steps client prediction forward in time.
-    pub fn tick(&self, dt: f32) {
-        let mut predicted = self.predicted.lock();
-        for dt in step_dt(dt, 1.0 / 60.0) {
-            predicted.tick(dt);
-        }
+    pub fn tick(&self, _dt: f32) {
+        // let mut predicted = self.predicted.lock();
+        // for dt in step_dt(dt, 1.0 / 60.0) {
+        // predicted.tick(dt);
+        // }
     }
 
     /// Updates the cursor position for this client player.
     pub fn update_cursor(&self, cursor: Point2<f32>) {
-        self.predicted.lock().cursor = clamp_cursor(cursor);
+        // self.predicted.lock().cursor = clamp_cursor(cursor);
         self.input_buffer.lock().store_input(
             Input {
                 cursor,
@@ -217,6 +228,7 @@ impl Game {
         let players = Players {
             players: &*players,
             snapshot,
+            predicted: None,
         };
         process(players)
     }
@@ -232,6 +244,7 @@ impl Game {
     >(
         &self,
         time: Instant,
+        cursor: Point2<f32>,
         delay: f32,
         process: F,
     ) -> O {
@@ -265,11 +278,16 @@ impl Game {
             None => InterpolatedSnapshot::new(0.0, old, old),
         };
 
+        let predicted = PlayerState {
+            cursor: clamp_cursor(cursor),
+            ..*snapshot.get(self.player_id).unwrap()
+        };
+
         let players = self.players.lock();
         let players = Players {
             players: &*players,
             snapshot,
-            // predicted: (self.player_id, *self.predicted.lock()),
+            predicted: Some((self.player_id, predicted)),//*self.predicted.lock()),
         };
         process(players)
     }

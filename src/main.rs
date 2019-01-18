@@ -69,7 +69,7 @@ fn run_gui() {
         &instance,
         surface,
         &mut imgui,
-        PresentMode::Relaxed,
+        PresentMode::Immediate,
     );
     let mut circle_rend = graphics::CircleRenderer::new(&mut graphics);
 

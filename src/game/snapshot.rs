@@ -1,5 +1,6 @@
 use crate::game::{Ball, PlayerId, PlayerState};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::{Add, Mul, Sub};
 
@@ -62,19 +63,35 @@ pub struct InterpolatedSnapshot<'a> {
 pub trait SnapshotView<'a> {
     /// Hopefully existential types will be a thing soon so using
     /// `Box` here won't be needed.
-    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a>;
+    fn players(
+        self,
+    ) -> Box<dyn Iterator<Item = (PlayerId, Cow<'a, PlayerState>)> + 'a>;
+
+    /// Gets a player by id.
+    fn get(&self, id: PlayerId) -> Option<Cow<'a, PlayerState>>;
 }
 
 impl<'a> SnapshotView<'a> for &'a Snapshot {
-    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a> {
-        Box::new(self.players.iter().map(|(&id, &state)| (id, state)))
+    fn players(
+        self,
+    ) -> Box<dyn Iterator<Item = (PlayerId, Cow<'a, PlayerState>)> + 'a> {
+        Box::new(
+            self.players.iter().map(|(&id, state)| (id, Cow::Borrowed(state))),
+        )
+    }
+
+    fn get(&self, id: PlayerId) -> Option<Cow<'a, PlayerState>> {
+        self.players.get(&id).map(Cow::Borrowed)
     }
 }
 
-impl<'a> From<InterpolatedSnapshot<'a>> for Snapshot {
-    fn from(snapshot: InterpolatedSnapshot<'a>) -> Snapshot {
+impl<'a, S: SnapshotView<'a>> From<S> for Snapshot {
+    fn from(snapshot: S) -> Snapshot {
         Snapshot {
-            players: snapshot.players().collect(),
+            players: snapshot
+                .players()
+                .map(|(id, player)| (id, *player))
+                .collect(),
         }
     }
 }
@@ -91,17 +108,34 @@ impl<'a> InterpolatedSnapshot<'a> {
             new,
         }
     }
+
+    fn interpolate(
+        &self,
+        new: &'a PlayerState,
+        old: Option<&'a PlayerState>,
+    ) -> Cow<'a, PlayerState> {
+        match old {
+            // If the old snapshot contains this player, interpolate.
+            Some(old) => Cow::Owned(old.interpolate(new, self.alpha)),
+            // Otherwise just use only the new snapshots.
+            None => Cow::Borrowed(new),
+        }
+    }
 }
 
 impl<'a> SnapshotView<'a> for InterpolatedSnapshot<'a> {
-    fn players(self) -> Box<dyn Iterator<Item = (PlayerId, PlayerState)> + 'a> {
+    fn players(
+        self,
+    ) -> Box<dyn Iterator<Item = (PlayerId, Cow<'a, PlayerState>)> + 'a> {
         Box::new(self.new.players.iter().map(move |(&id, new)| {
-            match self.old.players.get(&id) {
-                // If the old snapshot contains this player, interpolate.
-                Some(old) => (id, old.interpolate(new, self.alpha)),
-                // Otherwise just use only the new snapshots.
-                None => (id, *new),
-            }
+            (id, self.interpolate(new, self.old.players.get(&id)))
         }))
+    }
+
+    fn get(&self, id: PlayerId) -> Option<Cow<'a, PlayerState>> {
+        self.new
+            .players
+            .get(&id)
+            .map(|new| self.interpolate(new, self.old.players.get(&id)))
     }
 }
