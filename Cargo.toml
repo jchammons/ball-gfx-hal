@@ -32,13 +32,13 @@ structopt = "0.2.14"
 ctrlc = "3.1.1"
 lazy_static = "1.2.0"
 colored = "1.6.1"
-atomic = { version = "0.4.2", features = ["nightly"] }
 smallvec = { version = "0.6.7", features = ["union"] }
 ord_subset = "3.1.1"
 nalgebra = { version = "0.16.12", features = ["serde-serialize"] }
 num-traits = "0.2.6"
 either = "1.5.0"
 crossbeam = "0.6.0"
+num-derive = "0.2.3"
 
 [build-dependencies]
 shaderc = "0.3.12"

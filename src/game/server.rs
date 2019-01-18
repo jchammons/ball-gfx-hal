@@ -1,9 +1,10 @@
 use crate::game::{
-    clamp_cursor,
     step_dt,
+    Ball,
     GetPlayer,
     PlayerId,
     PlayerState,
+    RoundState,
     Snapshot,
     StaticPlayerState,
     BALL_RADIUS,
@@ -41,6 +42,7 @@ pub struct Player {
 #[derive(Clone, Debug, Default)]
 pub struct Game {
     players: HashMap<PlayerId, Player>,
+    round: RoundState,
     next_id: PlayerId,
 }
 
@@ -58,6 +60,11 @@ impl<'a> GetPlayer for &'a Player {
 }
 
 impl Game {
+    /// Starts the current round.
+    pub fn start_round(&mut self) {
+        self.round = RoundState::Started;
+    }
+
     /// Returns an iterator over the players.
     pub fn players(&self) -> impl Iterator<Item = (PlayerId, &Player)> {
         self.players.iter().map(|(&id, player)| (id, player))
@@ -66,6 +73,28 @@ impl Game {
     /// Gets a mutable reference to a player by id.
     pub fn player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
         self.players.get_mut(&id)
+    }
+
+    /// Sets the location of a player's cursor.
+    ///
+    /// If this is before the round is started, the starting position
+    /// of that player's ball is also updated.
+    ///
+    /// Returns `false` if there is no player corresponding to the id.
+    pub fn set_player_cursor(
+        &mut self,
+        id: PlayerId,
+        cursor: Point2<f32>,
+    ) -> bool {
+        let player = match self.players.get_mut(&id) {
+            Some(player) => player,
+            None => return false,
+        };
+        player.state.cursor = cursor;
+        if self.round == RoundState::Waiting {
+            player.state.ball = Ball::starting(cursor);
+        }
+        true
     }
 
     /// Generates a snapshot of the current game state.
@@ -81,6 +110,11 @@ impl Game {
 
     /// Steps the whole game world forward in time.
     pub fn tick(&mut self, dt: f32) {
+        if self.round == RoundState::Waiting {
+            // No simulation happens pre-round.
+            return;
+        }
+
         for dt in step_dt(dt, 1.0 / 60.0) {
             // Calculate individual ball spring physics.
             for player in self.players.values_mut() {
@@ -218,7 +252,7 @@ impl Game {
         };
         let lab_hue = LabHue::from_degrees(hue * 360.0);
         let player = Player {
-            state: PlayerState::new(clamp_cursor(cursor)),
+            state: PlayerState::new(cursor),
             static_state: StaticPlayerState {
                 color: Lch::new(75.0, 80.0, lab_hue).into(),
             },
