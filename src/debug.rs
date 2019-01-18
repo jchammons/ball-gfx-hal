@@ -36,6 +36,7 @@ pub struct DebugState {
     /// packet loss or jitter, but will increase visual latency.
     pub interpolation_delay: f32,
     pub network_tx: Sender<NetworkStats>,
+    pub show_window: bool,
     network_rx: Receiver<NetworkStats>,
     bandwidth_in_history: [f32; NETWORK_HISTORY_LENGTH],
     bandwidth_out_history: [f32; NETWORK_HISTORY_LENGTH],
@@ -50,6 +51,7 @@ impl Default for DebugState {
             draw_latest_snapshot: false,
             interpolation_delay: 1.5,
             network_tx,
+            show_window: false,
             network_rx,
             bandwidth_in_history: [0.0; NETWORK_HISTORY_LENGTH],
             bandwidth_out_history: [0.0; NETWORK_HISTORY_LENGTH],
@@ -92,6 +94,10 @@ impl DebugState {
         // Log the frame time.
         self.frame_time_history.copy_within(1.., 0);
         *self.frame_time_history.last_mut().unwrap() = frame_time;
+
+        if !self.show_window {
+            return;
+        }
 
         ui.window(im_str!("Debug")).build(|| {
             ui.tree_node(im_str!("Networking")).build(|| {

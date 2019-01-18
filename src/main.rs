@@ -8,7 +8,14 @@ use imgui_winit::ImGuiWinit;
 use std::net::SocketAddr;
 use std::time::Instant;
 use structopt::StructOpt;
-use winit::{Event, EventsLoop, Window, WindowEvent};
+use winit::{
+    ElementState,
+    Event,
+    EventsLoop,
+    VirtualKeyCode,
+    Window,
+    WindowEvent,
+};
 
 pub mod debug;
 pub mod double_buffer;
@@ -89,6 +96,19 @@ fn run_gui() {
                     },
                     WindowEvent::Resized(size) => {
                         window_size = size;
+                    },
+                    WindowEvent::KeyboardInput {
+                        input,
+                        ..
+                    } => {
+                        match input.virtual_keycode {
+                            Some(VirtualKeyCode::D)
+                                if input.state == ElementState::Pressed =>
+                            {
+                                debug.show_window = !debug.show_window;
+                            },
+                            _ => ()
+                        }
                     },
                     _ => (),
                 }
