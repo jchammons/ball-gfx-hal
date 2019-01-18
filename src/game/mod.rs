@@ -91,6 +91,16 @@ impl Ball {
     }
 }
 
+/// Clamps a cursor position within bounds.
+pub fn clamp_cursor(cursor: Point2<f32>) -> Point2<f32> {
+    let dist_sq = (cursor - Point2::origin()).norm_squared();
+    if dist_sq > (1.0 - CURSOR_RADIUS) {
+        (1.0 - CURSOR_RADIUS) * cursor / dist_sq.sqrt()
+    } else {
+        cursor
+    }
+}
+
 impl PlayerState {
     /// Creates a new player state given a cursor position.
     ///
