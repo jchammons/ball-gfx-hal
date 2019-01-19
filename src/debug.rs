@@ -4,11 +4,12 @@ use crate::ui;
 use crossbeam::channel::{self, Receiver, Sender};
 use gfx_hal::{Backend, PresentMode};
 use imgui::{im_str, ImString, Ui};
+use std::time::Duration;
 
 const NETWORK_HISTORY_LENGTH: usize = 256;
 const FRAME_TIME_HISTORY_LENGTH: usize = 256;
 
-pub const NETWORK_STATS_RATE: f32 = 0.1;
+pub const NETWORK_STATS_RATE: Duration = Duration::from_millis(100);
 
 #[derive(Default, Debug, Copy, Clone)]
 pub struct NetworkStats {
@@ -82,8 +83,8 @@ impl DebugState {
             self.rtt_history.copy_within(size.., 0);
             let start = NETWORK_HISTORY_LENGTH - size;
             for (i, stats) in self.network_rx.try_iter().enumerate() {
-                let bandwidth_in = stats.bytes_in as f32 / NETWORK_STATS_RATE;
-                let bandwidth_out = stats.bytes_out as f32 / NETWORK_STATS_RATE;
+                let bandwidth_in = stats.bytes_in as f32 / NETWORK_STATS_RATE.as_float_secs() as f32;
+                let bandwidth_out = stats.bytes_out as f32 / NETWORK_STATS_RATE.as_float_secs() as f32;
                 // Convert to KB
                 self.bandwidth_in_history[start + i] = bandwidth_in / 1000.0;
                 self.bandwidth_out_history[start + i] = bandwidth_out / 1000.0;
