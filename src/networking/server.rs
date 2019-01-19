@@ -1,12 +1,11 @@
 use crate::game::{
     clamp_cursor,
     server::Game,
+    Event,
     GetPlayer,
     PlayerId,
-    RoundState,
     Snapshot,
     StaticPlayerState,
-    ROUND_WAITING_TIME,
 };
 use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
@@ -18,20 +17,21 @@ use crate::networking::{
     CONNECTION_TIMEOUT,
     MAX_PACKET_SIZE,
     PING_RATE,
+    SNAPSHOT_RATE,
 };
 use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
-use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
+use mio::{self, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use mio_extras::timer::{self, Timeout, Timer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::Cursor;
+use std::iter;
 use std::net::SocketAddr;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const SNAPSHOT_RATE: f32 = 1.0 / 30.0;
 pub const TICK_RATE: f32 = 1.0 / 60.0;
 
 const SOCKET: Token = Token(0);
@@ -40,28 +40,15 @@ const SHUTDOWN: Token = Token(2);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TimeoutState {
-    SendTick,
-    GameTick,
+    SendSnapshot,
+    Tick,
     Ping,
-    StartRound,
     LostConnection(SocketAddr),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerPacket {
-    PlayerJoined {
-        id: PlayerId,
-        static_state: StaticPlayerState,
-    },
-    PlayerLeft(PlayerId),
-    Snapshot {
-        // TODO: avoid cloning the snapshot a bunch of times!
-        snapshot: Snapshot,
-        /// Last received input sequence, and the time in seconds
-        /// since it was received.
-        last_input: (u32, f32),
-    },
-    RoundState(RoundState),
+    Event(Event),
     Ping,
     Pong(u32),
 }
@@ -77,8 +64,6 @@ struct Client {
     player: PlayerId,
     connection: Connection,
     timeout: Timeout,
-    /// Sequence id of the last input, and the time it was received.
-    last_input: (u32, Instant),
     rtt: RttEstimator,
 }
 
@@ -223,7 +208,7 @@ impl EventHandler for Server {
         &self.poll
     }
 
-    fn handle(&mut self, event: Event) -> bool {
+    fn handle(&mut self, event: mio::Event) -> bool {
         match event.token() {
             SOCKET => {
                 if event.readiness().is_readable() {
@@ -236,13 +221,10 @@ impl EventHandler for Server {
             TIMER => {
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
-                        TimeoutState::StartRound => {
-                            self.start_round();
+                        TimeoutState::SendSnapshot => {
+                            self.send_snapshot();
                         },
-                        TimeoutState::SendTick => {
-                            self.send_tick();
-                        },
-                        TimeoutState::GameTick => {
+                        TimeoutState::Tick => {
                             self.game_tick();
                         },
                         TimeoutState::Ping => {
@@ -292,10 +274,10 @@ impl Server {
         // be generated from Server::send_tick.
         let send_tick =
             Interval::new(Duration::from_float_secs(f64::from(SNAPSHOT_RATE)));
-        timer.set_timeout(send_tick.interval(), TimeoutState::SendTick);
+        timer.set_timeout(send_tick.interval(), TimeoutState::SendSnapshot);
         let game_tick =
             Interval::new(Duration::from_float_secs(f64::from(TICK_RATE)));
-        timer.set_timeout(game_tick.interval(), TimeoutState::GameTick);
+        timer.set_timeout(game_tick.interval(), TimeoutState::Tick);
         let ping =
             Interval::new(Duration::from_float_secs(f64::from(PING_RATE)));
         timer.set_timeout(ping.interval(), TimeoutState::Ping);
@@ -385,13 +367,14 @@ impl Server {
         }
     }
 
-    fn start_round(&mut self) {
-        self.game.start_round();
-        if let Err(err) =
-            self.broadcast(&ServerPacket::RoundState(RoundState::Started))
-        {
-            error!("error sending round state packet: {}", err);
+    fn send_events<E: Iterator<Item = Event>>(
+        &mut self,
+        events: E,
+    ) -> Result<(), Error> {
+        for event in events {
+            self.broadcast(&ServerPacket::Event(event))?;
         }
+        Ok(())
     }
 
     fn send_ping(&mut self) {
@@ -419,33 +402,18 @@ impl Server {
         }
     }
 
-    fn send_tick(&mut self) {
+    fn send_snapshot(&mut self) {
         // Send a snapshot to all connected clients.
         let now = Instant::now();
         let (_, interval) = self.send_tick.next(now);
-        self.timer.set_timeout(interval, TimeoutState::SendTick);
+        self.timer.set_timeout(interval, TimeoutState::SendSnapshot);
 
         let snapshot = self.game.snapshot();
         trace!("sending snapshot: {:#?}", snapshot);
-        let packets = self.clients.iter_mut().filter_map(|(&addr, client)| {
-            let input_delay =
-                now.duration_since(client.last_input.1).as_float_secs() as f32;
-            let packet = ServerPacket::Snapshot {
-                snapshot: snapshot.clone(),
-                last_input: (client.last_input.0, input_delay),
-            };
-
-            // Don't stop on encountering errors.
-            Packet::single_client(addr, client, &packet)
-                .map(|(packet, _)| packet)
-                .map_err(|err| {
-                    error!("error sending tick to {}: {}", &addr, err);
-                })
-                .ok()
-        });
-        self.send_queue.extend(packets);
-        if let Err(err) = self.reregister_socket(true) {
-            error!("failed to reregister socket as writable: {}", err);
+        if let Err(err) =
+            self.send_events(iter::once(Event::Snapshot(snapshot)))
+        {
+            error!("error sending snapshot: {}", err);
         }
     }
 
@@ -453,10 +421,13 @@ impl Server {
         let now = Instant::now();
         let (dt, interval) = self.game_tick.next(now);
         let dt = dt.as_float_secs() as f32;
-        self.timer.set_timeout(interval, TimeoutState::GameTick);
+        self.timer.set_timeout(interval, TimeoutState::Tick);
 
         debug!("stepping game tick (dt={})", dt);
-        self.game.tick(dt);
+        let events = self.game.tick(dt);
+        if let Err(err) = self.send_events(events) {
+            error!("error sending events: {}", err);
+        }
     }
 
     fn new_client(
@@ -467,21 +438,15 @@ impl Server {
     ) -> Result<(), Error> {
         info!("new player from {}", addr);
 
-        if self.game.players.is_empty() {
-            // This is the first player.
-            self.timer.set_timeout(
-                Duration::from_float_secs(f64::from(ROUND_WAITING_TIME)),
-                TimeoutState::StartRound,
-            );
-        }
         let timeout = self.timer.set_timeout(
             Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
             TimeoutState::LostConnection(addr),
         );
 
-        let (player_id, player) =
+        let (player_id, events) =
             self.game.add_player(clamp_cursor(handshake.cursor));
-        let static_state = player.static_state().clone();
+        self.send_events(events)?;
+
         // Now start processing this client.
         self.clients.insert(
             addr,
@@ -489,7 +454,6 @@ impl Server {
                 timeout,
                 player: player_id,
                 connection,
-                last_input: (0, Instant::now()),
                 rtt: RttEstimator::default(),
             },
         );
@@ -506,24 +470,14 @@ impl Server {
         };
         self.send_to(addr, &packet)?;
 
-        // Broadcast join message to the every other client.
-        let packet = ServerPacket::PlayerJoined {
-            id: player_id,
-            static_state,
-        };
-        self.broadcast_filter(|client_addr, _| client_addr != &addr, &packet)?;
-
         Ok(())
     }
 
     fn remove_client(&mut self, addr: &SocketAddr) -> Result<(), Error> {
         if let Some(client) = self.clients.remove(addr) {
             info!("player {} from {} left", client.player, addr);
-            self.game.remove_player(client.player);
-
-            // Send disconnect message to rest of clients.
-            let packet = ServerPacket::PlayerLeft(client.player);
-            self.broadcast(&packet)?;
+            let events = self.game.remove_player(client.player);
+            self.send_events(events)?;
         }
 
         Ok(())
@@ -551,15 +505,11 @@ impl Server {
                 let (packet, sequence, _) =
                     client.connection.decode(Cursor::new(packet))?;
                 match packet {
-                    ClientPacket::Input {
-                        input,
-                        sequence,
-                    } => {
+                    ClientPacket::Input(input) => {
                         self.game.set_player_cursor(
                             client.player,
                             clamp_cursor(input.cursor),
                         );
-                        client.last_input = (sequence, Instant::now());
                     },
                     ClientPacket::Disconnect => {
                         self.remove_client(&addr)?;
@@ -616,33 +566,7 @@ impl Server {
 
     fn broadcast<P: Serialize>(&mut self, packet: &P) -> Result<(), Error> {
         let packet = Packet::new(
-                self.clients.keys().cloned().collect::<Vec<_>>(),
-                packet,
-                &mut self.clients,
-        )?;
-        if let Some(packet) = packet {
-            self.send_queue.push_back(packet);
-            self.reregister_socket(true)?;
-        }
-        Ok(())
-    }
-
-    fn broadcast_filter<P: Serialize, F: Fn(&SocketAddr, &Client) -> bool>(
-        &mut self,
-        filter: F,
-        packet: &P,
-    ) -> Result<(), Error> {
-        let packet = Packet::new(
-            self.clients
-                .iter()
-                .filter_map(|(addr, client)| {
-                    if filter(addr, client) {
-                        Some(*addr)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>(),
+            self.clients.keys().cloned().collect::<Vec<_>>(),
             packet,
             &mut self.clients,
         )?;

@@ -1,6 +1,7 @@
 use crate::game::{
     step_dt,
     Ball,
+    Event,
     GetPlayer,
     PlayerId,
     PlayerState,
@@ -61,12 +62,6 @@ impl<'a> GetPlayer for &'a Player {
 }
 
 impl Game {
-    /// Starts the current round.
-    pub fn start_round(&mut self) {
-        self.round = RoundState::Started;
-        info!("starting round");
-    }
-
     /// Returns an iterator over the players.
     pub fn players(&self) -> impl Iterator<Item = (PlayerId, &Player)> {
         self.players.iter().map(|(&id, player)| (id, player))
@@ -92,8 +87,15 @@ impl Game {
             Some(player) => player,
             None => return false,
         };
-        player.state.set_cursor(cursor);
-        if self.round == RoundState::Waiting {
+
+        if self.round.running() {
+            player.state.set_cursor(cursor);
+        } else {
+            // In any non-round states, always set players alive.
+            player.state.cursor = Some(cursor);
+        }
+
+        if !self.round.running() {
             player.state.ball = Ball::starting(cursor);
         }
         true
@@ -111,10 +113,15 @@ impl Game {
     }
 
     /// Steps the whole game world forward in time.
-    pub fn tick(&mut self, dt: f32) {
-        if self.round == RoundState::Waiting {
-            // No simulation happens pre-round.
-            return;
+    pub fn tick(&mut self, dt: f32) -> impl Iterator<Item = Event> {
+        let transition = self.round.tick(dt);
+        if let Some(round) = transition {
+            self.round = round;
+        }
+
+        if !self.round.running() {
+            // No simulation happens if not running.
+            return transition.map(Event::RoundState).into_iter();
         }
 
         for dt in step_dt(dt, 1.0 / 60.0) {
@@ -249,11 +256,28 @@ impl Game {
                 self.players.get_mut(&id).unwrap().state.cursor = None;
             }
         }
+
+        if let RoundState::Round = self.round {
+            // End the round if there are one or less players still
+            // alive.
+            let num_alive = self
+                .players
+                .values()
+                .filter(|player| player.state.alive())
+                .count();
+            if num_alive <= 1 {
+                self.round = RoundState::post_round();
+                return Some(Event::RoundState(self.round)).into_iter();
+            }
+        }
+        transition.map(Event::RoundState).into_iter()
     }
 
-    /// Adds a new player and returns the id and state of the added
-    /// player.
-    pub fn add_player(&mut self, cursor: Point2<f32>) -> (PlayerId, &Player) {
+    /// Adds a new player and returns the id of the added.
+    pub fn add_player(
+        &mut self,
+        cursor: Point2<f32>,
+    ) -> (PlayerId, impl Iterator<Item = Event>) {
         let mut rng = thread_rng();
         let id = self.next_id;
         self.next_id += 1;
@@ -286,21 +310,49 @@ impl Game {
                 .unwrap()
         };
         let lab_hue = LabHue::from_degrees(hue * 360.0);
+        let static_state = StaticPlayerState {
+            color: Lch::new(75.0, 80.0, lab_hue).into(),
+        };
         let player = Player {
             state: PlayerState::new(cursor),
-            static_state: StaticPlayerState {
-                color: Lch::new(75.0, 80.0, lab_hue).into(),
-            },
+            static_state: static_state.clone(),
             hue,
         };
 
         debug_assert!(!self.players.contains_key(&id));
-        let player = self.players.entry(id).or_insert(player);
-        (id, player)
+        self.players.insert(id, player);
+
+        let mut events = SmallVec::<[_; 2]>::new();
+        events.push(Event::NewPlayer {
+            id,
+            static_state,
+        });
+        // Queue a waiting round if there are two or more players.
+        if let RoundState::Lobby = self.round {
+            if self.players.len() >= 2 {
+                self.round = RoundState::waiting();
+                events.push(Event::RoundState(self.round));
+            }
+        }
+
+        (id, events.into_iter())
     }
 
     /// Removes the player with a given id.
-    pub fn remove_player(&mut self, id: PlayerId) {
+    pub fn remove_player(
+        &mut self,
+        id: PlayerId,
+    ) -> impl Iterator<Item = Event> {
         self.players.remove(&id);
+
+        let mut events = SmallVec::<[_; 2]>::new();
+        events.push(Event::RemovePlayer(id));
+        // If there are less than two players left, stop the round.
+        if self.players.len() < 2 {
+            self.round = RoundState::Lobby;
+            events.push(Event::RoundState(self.round))
+        }
+
+        events.into_iter()
     }
 }

@@ -42,10 +42,7 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
-    Input {
-        sequence: u32,
-        input: Input,
-    },
+    Input(Input),
     Disconnect,
     Ping,
     Pong(u32),
@@ -66,7 +63,6 @@ pub enum ClientState {
         tick: Interval,
         rtt: RttEstimator,
         ping: Interval,
-        latest_snapshot_seq: u32,
         game: Arc<Game>,
     },
 }
@@ -408,14 +404,7 @@ impl Client {
                 let (_, interval) = tick.next(now);
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
-                let mut input_buffer = game.input_buffer.lock();
-                let (sequence, _) = input_buffer.packet_send();
-                let packet = ClientPacket::Input {
-                    input: *input_buffer.latest(),
-                    sequence,
-                };
-                drop(input_buffer);
-
+                let packet = ClientPacket::Input(game.latest_input());
                 trace!("sending tick packet to server: {:?}", packet);
                 self.send(&packet)?;
             },
@@ -439,9 +428,9 @@ impl Client {
                 ref cursor,
             } => {
                 // Assumed to be a handshake packet.
-                let (handshake, sequence, _) =
-                    self.connection
-                        .decode::<_, ServerHandshake>(Cursor::new(packet))?;
+                let (handshake, ..) = self
+                    .connection
+                    .decode::<_, ServerHandshake>(Cursor::new(packet))?;
                 let game = Arc::new(Game::new(
                     handshake.players,
                     handshake.snapshot,
@@ -468,48 +457,18 @@ impl Client {
                     tick,
                     ping,
                     rtt: RttEstimator::default(),
-                    latest_snapshot_seq: sequence,
                 })
             },
 
             ClientState::Connected {
                 ref mut game,
-                ref mut latest_snapshot_seq,
                 ref mut rtt,
                 ..
             } => {
                 let (packet, sequence, _) =
                     self.connection.decode(Cursor::new(packet))?;
                 match packet {
-                    ServerPacket::Snapshot {
-                        snapshot,
-                        last_input: (input_sequence, input_delay),
-                    } => {
-                        game.input_buffer.lock().packet_ack(input_sequence);
-                        trace!("got snapshot from server");
-                        // Only process snapshots that are newer than
-                        // the last one. Out of order snapshots are
-                        // dropped.
-                        if sequence > *latest_snapshot_seq {
-                            game.insert_snapshot(snapshot, input_delay);
-                            *latest_snapshot_seq = sequence;
-                        }
-                    },
-                    ServerPacket::PlayerJoined {
-                        id,
-                        static_state,
-                    } => {
-                        info!("new player joined: {}", id);
-                        game.add_player(id, static_state);
-                    },
-                    ServerPacket::PlayerLeft(id) => {
-                        info!("player {} left", id);
-                        game.remove_player(id);
-                    },
-                    ServerPacket::RoundState(round) => {
-                        info!("transitioning to state: {:?}", round);
-                        game.round.store(round);
-                    },
+                    ServerPacket::Event(event) => game.handle_event(event),
                     ServerPacket::Pong(sequence) => {
                         rtt.pong(sequence);
                     },

@@ -1,50 +1,52 @@
 use crate::graphics::Circle;
 use nalgebra::{self, Point2, Vector2};
-use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::{FromPrimitive, ToPrimitive};
 use palette::LinSrgb;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::iter;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod client;
-pub mod input;
 pub mod server;
 pub mod snapshot;
 
-pub use self::input::*;
 pub use self::snapshot::*;
 
 pub const BALL_RADIUS: f32 = 0.15;
 pub const CURSOR_RADIUS: f32 = 0.05;
-pub const ROUND_WAITING_TIME: f32 = 3.0;
 const SPRING_CONSTANT: f32 = 8.0;
 const BALL_START_DISTANCE: f32 = 0.3;
 const BALL_START_SPEED: f32 = 1.0;
 pub type PlayerId = u16;
 
-/// Different stages of a round.
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    Eq,
-    PartialEq,
-    FromPrimitive,
-    ToPrimitive,
-    Serialize,
-    Deserialize,
-)]
+/// Finite state machine for the round state.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum RoundState {
-    Waiting,
-    Started,
+    /// Less than two players, so nothing happens.
+    Lobby,
+    /// More than two players, waiting for a round to start.
+    Waiting(f32),
+    /// More than one player left alive.
+    Round,
+    /// One or less players alive, waiting for the round to end.
+    PostRound(f32),
 }
 
-/// A small wrapper around [RoundState] with thread safe mutability.
-#[derive(Debug)]
-pub struct AtomicRoundState(AtomicUsize);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Event {
+    RoundState(RoundState),
+    NewPlayer {
+        id: PlayerId,
+        static_state: StaticPlayerState,
+    },
+    RemovePlayer(PlayerId),
+    Snapshot(Snapshot),
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct Input {
+    pub cursor: Point2<f32>,
+}
 
 /// Dynamic state for the large ball.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -104,29 +106,51 @@ pub trait GetPlayer {
 
 impl Default for RoundState {
     fn default() -> RoundState {
-        RoundState::Waiting
+        RoundState::Lobby
     }
 }
 
-impl Default for AtomicRoundState {
-    fn default() -> AtomicRoundState {
-        AtomicRoundState::from(RoundState::Waiting)
-    }
-}
-
-impl From<RoundState> for AtomicRoundState {
-    fn from(round: RoundState) -> AtomicRoundState {
-        AtomicRoundState(AtomicUsize::new(round.to_usize().unwrap()))
-    }
-}
-
-impl AtomicRoundState {
-    pub fn load(&self) -> RoundState {
-        RoundState::from_usize(self.0.load(Ordering::Relaxed)).unwrap()
+impl RoundState {
+    /// Waiting state, for the default initial time.
+    pub fn waiting() -> RoundState {
+        RoundState::Waiting(3.0) // 3 seconds
     }
 
-    pub fn store(&self, round: RoundState) {
-        self.0.store(round.to_usize().unwrap(), Ordering::Relaxed);
+    /// Post-round state, for the default initial time.
+    pub fn post_round() -> RoundState {
+        RoundState::PostRound(3.0) // 3 seconds
+    }
+
+    /// Whether a round is actually running in this state.
+    pub fn running(self) -> bool {
+        match self {
+            RoundState::Round | RoundState::PostRound(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Tick any timers on this state, returning a possible transition.
+    ///
+    /// The reason that this doesn't just transition itself is that
+    /// sometimes you want to ignore the transition. For example, the
+    /// client should just wait for a message from the server.
+    pub fn tick(&mut self, dt: f32) -> Option<RoundState> {
+        match self {
+            RoundState::Waiting(ref mut time) => {
+                *time -= dt;
+                if *time < 0.0 {
+                    return Some(RoundState::Round);
+                }
+            },
+            RoundState::PostRound(ref mut time) => {
+                *time -= dt;
+                if *time < 0.0 {
+                    return Some(RoundState::waiting());
+                }
+            },
+            _ => (),
+        }
+        None
     }
 }
 
