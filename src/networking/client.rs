@@ -1,5 +1,5 @@
 use crate::debug::{NetworkStats, NETWORK_STATS_RATE};
-use crate::game::{client::Game, Input};
+use crate::game::{client::{Game, GameHandle}, Input};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
@@ -56,14 +56,14 @@ pub struct ClientHandshake {
 
 pub enum ClientState {
     Connecting {
-        done: Sender<Result<Arc<Game>, Error>>,
+        done: Sender<Result<Game, Error>>,
         cursor: Point2<f32>,
     },
     Connected {
         tick: Interval,
         rtt: RttEstimator,
         ping: Interval,
-        game: Arc<Game>,
+        game: GameHandle,
     },
 }
 
@@ -92,7 +92,7 @@ pub struct ClientHandle {
 }
 
 pub struct ConnectingHandle {
-    done: Receiver<Result<Arc<Game>, Error>>,
+    done: Receiver<Result<Game, Error>>,
 }
 
 pub fn connect(
@@ -141,7 +141,7 @@ impl ClientHandle {
 
 impl ConnectingHandle {
     /// Gets the connection result, if connection finished.
-    pub fn done(&mut self) -> Option<Result<Arc<Game>, Error>> {
+    pub fn done(&mut self) -> Option<Result<Game, Error>> {
         match self.done.try_recv() {
             Ok(done) => Some(done),
             Err(_) => None,
@@ -243,7 +243,7 @@ impl EventHandler for Client {
 impl Client {
     pub fn new(
         addr: SocketAddr,
-        done: Sender<Result<Arc<Game>, Error>>,
+        done: Sender<Result<Game, Error>>,
         stats: Sender<NetworkStats>,
         shutdown: Registration,
         disconnected: Arc<AtomicBool>,
@@ -431,12 +431,12 @@ impl Client {
                 let (handshake, ..) = self
                     .connection
                     .decode::<_, ServerHandshake>(Cursor::new(packet))?;
-                let game = Arc::new(Game::new(
+                let (game, game_handle) = Game::new(
                     handshake.players,
                     handshake.snapshot,
                     handshake.id,
                     *cursor,
-                ));
+                );
                 let tick = Interval::new(Duration::from_float_secs(f64::from(
                     TICK_RATE,
                 )));
@@ -448,12 +448,12 @@ impl Client {
                 self.timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
                 // Signal the main thread that connection finished.
-                done.send(Ok(game.clone())).unwrap();
+                done.send(Ok(game)).unwrap();
 
                 info!("completed connection to server");
                 // Transition to connected state.
                 Some(ClientState::Connected {
-                    game,
+                    game: game_handle,
                     tick,
                     ping,
                     rtt: RttEstimator::default(),
@@ -468,7 +468,7 @@ impl Client {
                 let (packet, sequence, _) =
                     self.connection.decode(Cursor::new(packet))?;
                 match packet {
-                    ServerPacket::Event(event) => game.handle_event(event),
+                    ServerPacket::Event(event) => game.event(event),
                     ServerPacket::Pong(sequence) => {
                         rtt.pong(sequence);
                     },
