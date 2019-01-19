@@ -11,14 +11,14 @@ use crate::game::{
     StaticPlayerState,
 };
 use crate::networking::SNAPSHOT_RATE;
+use crossbeam::channel::{self, Receiver, Sender};
 use log::{info, warn};
 use nalgebra::Point2;
 use parking_lot::Mutex;
-use crossbeam::channel::{self, Sender, Receiver};
-use std::sync::Arc;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Player<'a> {
@@ -123,7 +123,7 @@ impl GameHandle {
 
     pub fn latest_input(&self) -> Input {
         Input {
-            cursor: *self.cursor.lock()
+            cursor: *self.cursor.lock(),
         }
     }
 }
@@ -140,8 +140,8 @@ impl Game {
         let (events_tx, events_rx) = channel::bounded(16);
         let cursor = Arc::new(Mutex::new(cursor));
         let game = Game {
-            players: players,
-            snapshots: snapshots,
+            players,
+            snapshots,
             cursor: cursor.clone(),
             events: events_rx,
             round: RoundState::default(),
@@ -173,7 +173,8 @@ impl Game {
                     info!("removing player {}", id);
                     if self.players.remove(&id).is_none() {
                         warn!(
-                            "attempting to remove player that was never added ({})",
+                            "attempting to remove player that was never added \
+                             ({})",
                             id
                         );
                     }
@@ -198,9 +199,7 @@ impl Game {
 
     /// Returns the set of players corresponding to the most recent
     /// snapshot.
-    pub fn latest_players(
-        &self,
-    ) -> Players<&Snapshot> {
+    pub fn latest_players(&self) -> Players<&Snapshot> {
         let (snapshot, _) = &self.snapshots[self.snapshots.len() - 1];
         Players {
             players: &self.players,
@@ -217,8 +216,7 @@ impl Game {
         cursor: Point2<f32>,
         delay: f32,
     ) -> Players<InterpolatedSnapshot> {
-        let delayed_time =
-            time - Duration::from_float_secs(f64::from(delay * SNAPSHOT_RATE));
+        let delayed_time = time - SNAPSHOT_RATE.mul_f64(delay.into());
 
         // Get rid of old snapshots.
         while self.snapshots.len() > 1 && delayed_time > self.snapshots[1].1 {

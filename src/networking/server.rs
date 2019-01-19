@@ -32,7 +32,7 @@ use std::net::SocketAddr;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const TICK_RATE: f32 = 1.0 / 60.0;
+pub const TICK_RATE: Duration = Duration::from_millis(15);
 
 const SOCKET: Token = Token(0);
 const TIMER: Token = Token(1);
@@ -272,14 +272,11 @@ impl Server {
 
         // Set timeout for the first tick. All subsequent ticks will
         // be generated from Server::send_tick.
-        let send_tick =
-            Interval::new(Duration::from_float_secs(f64::from(SNAPSHOT_RATE)));
+        let send_tick = Interval::new(SNAPSHOT_RATE);
         timer.set_timeout(send_tick.interval(), TimeoutState::SendSnapshot);
-        let game_tick =
-            Interval::new(Duration::from_float_secs(f64::from(TICK_RATE)));
+        let game_tick = Interval::new(TICK_RATE);
         timer.set_timeout(game_tick.interval(), TimeoutState::Tick);
-        let ping =
-            Interval::new(Duration::from_float_secs(f64::from(PING_RATE)));
+        let ping = Interval::new(PING_RATE);
         timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
         Ok(Server {
@@ -439,7 +436,7 @@ impl Server {
         info!("new player from {}", addr);
 
         let timeout = self.timer.set_timeout(
-            Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
+            CONNECTION_TIMEOUT,
             TimeoutState::LostConnection(addr),
         );
 
@@ -498,9 +495,10 @@ impl Server {
                 // Reset timeout.
                 self.timer.cancel_timeout(&client.timeout);
                 client.timeout = self.timer.set_timeout(
-                    Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
+                    CONNECTION_TIMEOUT,
                     TimeoutState::LostConnection(addr),
                 );
+
                 // Existing player.
                 let (packet, sequence, _) =
                     client.connection.decode(Cursor::new(packet))?;

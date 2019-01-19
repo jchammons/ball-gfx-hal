@@ -1,6 +1,6 @@
 use failure::{Backtrace, Fail};
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub mod client;
 pub mod connection;
@@ -13,13 +13,13 @@ pub mod tick;
 pub const MAX_PACKET_SIZE: usize = 4096;
 
 /// Rate at which both the client and the server send out pings.
-pub const PING_RATE: f32 = 0.5;
-
-/// Seconds to wait before marking a connection as timed out.
-pub const CONNECTION_TIMEOUT: f32 = 5.0;
+pub const PING_RATE: Duration = Duration::from_millis(500);
 
 /// Rate at which the server sends snapshots.
-pub const SNAPSHOT_RATE: f32 = 1.0 / 30.0;
+pub const SNAPSHOT_RATE: Duration = Duration::from_millis(30);
+
+/// Seconds to wait before marking a connection as timed out.
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// System to estimate rtt for a connection by periodically sending
 /// pings and recording the time until a response is received.

@@ -341,9 +341,14 @@ impl GameState {
                     circle_rend.draw(ctx, circles);
                 }
 
-                let players = game.interpolated_players(now,
-                                                        clamp_cursor(*cursor), debug.interpolation_delay);
-                let circles = players.into_iter().flat_map(|(_, player)| player.draw(SCALE));
+                let players = game.interpolated_players(
+                    now,
+                    clamp_cursor(*cursor),
+                    debug.interpolation_delay,
+                );
+                let circles = players
+                    .into_iter()
+                    .flat_map(|(_, player)| player.draw(SCALE));
 
                 circle_rend.draw(ctx, circles);
             },

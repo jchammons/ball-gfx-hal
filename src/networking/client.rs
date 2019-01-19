@@ -1,5 +1,8 @@
 use crate::debug::{NetworkStats, NETWORK_STATS_RATE};
-use crate::game::{client::{Game, GameHandle}, Input};
+use crate::game::{
+    client::{Game, GameHandle},
+    Input,
+};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
@@ -30,7 +33,7 @@ const SOCKET: Token = Token(0);
 const TIMER: Token = Token(1);
 const SHUTDOWN: Token = Token(2);
 
-const TICK_RATE: f32 = 1.0 / 30.0;
+const TICK_RATE: Duration = Duration::from_millis(15);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TimeoutState {
@@ -203,9 +206,7 @@ impl EventHandler for Client {
                             self.stats_tx.send(self.stats).unwrap();
                             self.stats = NetworkStats::default();
                             self.timer.set_timeout(
-                                Duration::from_float_secs(f64::from(
-                                    NETWORK_STATS_RATE,
-                                )),
+                                NETWORK_STATS_RATE,
                                 TimeoutState::UpdateStats,
                             );
                         },
@@ -263,14 +264,9 @@ impl Client {
         poll.register(&shutdown, SHUTDOWN, Ready::readable(), PollOpt::edge())
             .map_err(Error::poll_register)?;
 
-        let timeout = timer.set_timeout(
-            Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
-            TimeoutState::LostConnection,
-        );
-        timer.set_timeout(
-            Duration::from_float_secs(f64::from(NETWORK_STATS_RATE)),
-            TimeoutState::UpdateStats,
-        );
+        let timeout =
+            timer.set_timeout(CONNECTION_TIMEOUT, TimeoutState::LostConnection);
+        timer.set_timeout(NETWORK_STATS_RATE, TimeoutState::UpdateStats);
 
         let mut client = Client {
             socket,
@@ -306,9 +302,7 @@ impl Client {
                     // Reset the connection timeout.
                     self.timer.cancel_timeout(&self.timeout);
                     self.timeout = self.timer.set_timeout(
-                        Duration::from_float_secs(f64::from(
-                            CONNECTION_TIMEOUT,
-                        )),
+                        CONNECTION_TIMEOUT,
                         TimeoutState::LostConnection,
                     );
                     // Handle packet.
@@ -437,12 +431,8 @@ impl Client {
                     handshake.id,
                     *cursor,
                 );
-                let tick = Interval::new(Duration::from_float_secs(f64::from(
-                    TICK_RATE,
-                )));
-                let ping = Interval::new(Duration::from_float_secs(f64::from(
-                    PING_RATE,
-                )));
+                let tick = Interval::new(TICK_RATE);
+                let ping = Interval::new(PING_RATE);
                 // Start the timer for sending input ticks and pings.
                 self.timer.set_timeout(tick.interval(), TimeoutState::Tick);
                 self.timer.set_timeout(ping.interval(), TimeoutState::Ping);
