@@ -14,7 +14,6 @@ use palette::LinSrgb;
 use std::iter;
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     dpi::LogicalPosition,
@@ -54,7 +53,7 @@ pub enum GameState {
         server_addr_host: ImString,
         server: Option<ServerHandle>,
         client: ClientHandle,
-        game: Arc<Game>,
+        game: Game,
         cursor: Point2<f32>,
         locked: bool,
     },
@@ -198,7 +197,7 @@ impl GameState {
             GameState::InGame {
                 ref server_addr,
                 ref server_addr_host,
-                ref game,
+                ref mut game,
                 ref client,
                 ref server,
                 ref cursor,
@@ -326,32 +325,27 @@ impl GameState {
             } => {
                 // TODO use the z-buffer to reduce overdraw here
                 circle_rend.draw(ctx, iter::once(bounds_circle()));
+
                 if debug.draw_latest_snapshot {
                     // TODO avoid submitting a second drawcall here
-                    game.latest_players(|players| {
-                        let circles = players
-                            .into_iter()
-                            .flat_map(|(_, player)| player.draw(SCALE))
-                            .map(|circle| {
-                                Circle {
-                                    color: LinSrgb::new(0.8, 0.0, 0.0),
-                                    ..circle
-                                }
-                            });
-                        circle_rend.draw(ctx, circles);
-                    });
+                    let players = game.latest_players();
+                    let circles = players
+                        .into_iter()
+                        .flat_map(|(_, player)| player.draw(SCALE))
+                        .map(|circle| {
+                            Circle {
+                                color: LinSrgb::new(0.8, 0.0, 0.0),
+                                ..circle
+                            }
+                        });
+                    circle_rend.draw(ctx, circles);
                 }
-                game.interpolated_players(
-                    now,
-                    clamp_cursor(*cursor),
-                    debug.interpolation_delay,
-                    |players| {
-                        let circles = players
-                            .into_iter()
-                            .flat_map(|(_, player)| player.draw(SCALE));
-                        circle_rend.draw(ctx, circles);
-                    },
-                );
+
+                let players = game.interpolated_players(now,
+                                                        clamp_cursor(*cursor), debug.interpolation_delay);
+                let circles = players.into_iter().flat_map(|(_, player)| player.draw(SCALE));
+
+                circle_rend.draw(ctx, circles);
             },
         }
     }
