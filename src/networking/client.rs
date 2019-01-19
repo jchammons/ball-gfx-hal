@@ -4,7 +4,13 @@ use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::server::{ServerHandshake, ServerPacket};
 use crate::networking::tick::Interval;
-use crate::networking::{Error, RttEstimator, MAX_PACKET_SIZE, PING_RATE};
+use crate::networking::{
+    Error,
+    RttEstimator,
+    CONNECTION_TIMEOUT,
+    MAX_PACKET_SIZE,
+    PING_RATE,
+};
 use crossbeam::channel::{self, Receiver, Sender};
 use log::{error, info, trace, warn};
 use mio::net::UdpSocket;
@@ -15,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,7 +37,7 @@ enum TimeoutState {
     Tick,
     Ping,
     UpdateStats,
-    Connect,
+    LostConnection,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,7 +60,6 @@ pub struct ClientHandshake {
 pub enum ClientState {
     Connecting {
         done: Sender<Result<Arc<Game>, Error>>,
-        timeout: Timeout,
         cursor: Point2<f32>,
     },
     Connected {
@@ -71,9 +77,11 @@ pub struct Client {
     recv_buffer: [u8; MAX_PACKET_SIZE],
     send_queue: VecDeque<Vec<u8>>,
     poll: Poll,
+    timeout: Timeout,
     connection: Connection,
     state: ClientState,
     _shutdown: Registration,
+    disconnected: Arc<AtomicBool>,
     /// Marks after `shutdown` has been received, to shutdown when the
     /// `send_queue` is empty.
     needs_shutdown: bool,
@@ -84,6 +92,7 @@ pub struct Client {
 /// Client handle used while connecting to a sever.
 pub struct ClientHandle {
     shutdown: SetReadiness,
+    disconnected: Arc<AtomicBool>,
 }
 
 pub struct ConnectingHandle {
@@ -97,14 +106,22 @@ pub fn connect(
 ) -> Result<(ClientHandle, ConnectingHandle), Error> {
     let (done_tx, done_rx) = channel::bounded(1);
     let (shutdown_registration, shutdown_set_readiness) = Registration::new2();
-    let mut client =
-        Client::new(addr, done_tx, stats, shutdown_registration, cursor)?;
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let mut client = Client::new(
+        addr,
+        done_tx,
+        stats,
+        shutdown_registration,
+        disconnected.clone(),
+        cursor,
+    )?;
     thread::spawn(move || {
         run_event_loop(&mut client);
     });
     Ok((
         ClientHandle {
             shutdown: shutdown_set_readiness,
+            disconnected,
         },
         ConnectingHandle {
             done: done_rx,
@@ -118,6 +135,11 @@ impl ClientHandle {
         if let Err(err) = self.shutdown.set_readiness(Ready::readable()) {
             warn!("failed to signal shutdown to client: {}", err)
         }
+    }
+
+    /// Checks if the client has disconnected.
+    pub fn disconnected(&self) -> bool {
+        self.disconnected.load(Ordering::SeqCst)
     }
 }
 
@@ -191,16 +213,17 @@ impl EventHandler for Client {
                                 TimeoutState::UpdateStats,
                             );
                         },
-                        TimeoutState::Connect => {
+                        TimeoutState::LostConnection => {
+                            self.disconnected.store(true, Ordering::Relaxed);
+                            info!("client connection timed out");
                             if let ClientState::Connecting {
                                 ref mut done,
                                 ..
                             } = self.state
                             {
                                 let _ = done.send(Err(Error::TimedOut));
-                                info!("client connection timed out");
-                                return true;
                             }
+                            return true;
                         },
                     }
                 }
@@ -227,6 +250,7 @@ impl Client {
         done: Sender<Result<Arc<Game>, Error>>,
         stats: Sender<NetworkStats>,
         shutdown: Registration,
+        disconnected: Arc<AtomicBool>,
         cursor: Point2<f32>,
     ) -> Result<Client, Error> {
         let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap())
@@ -243,8 +267,10 @@ impl Client {
         poll.register(&shutdown, SHUTDOWN, Ready::readable(), PollOpt::edge())
             .map_err(Error::poll_register)?;
 
-        let timeout =
-            timer.set_timeout(Duration::from_secs(5), TimeoutState::Connect);
+        let timeout = timer.set_timeout(
+            Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
+            TimeoutState::LostConnection,
+        );
         timer.set_timeout(
             Duration::from_float_secs(f64::from(NETWORK_STATS_RATE)),
             TimeoutState::UpdateStats,
@@ -256,12 +282,13 @@ impl Client {
             recv_buffer: [0; MAX_PACKET_SIZE],
             send_queue: VecDeque::new(),
             poll,
+            timeout,
             connection: Connection::default(),
             state: ClientState::Connecting {
                 done,
-                timeout,
                 cursor,
             },
+            disconnected,
             _shutdown: shutdown,
             stats_tx: stats,
             stats: NetworkStats::default(),
@@ -280,6 +307,15 @@ impl Client {
         loop {
             match self.socket.recv(&mut self.recv_buffer) {
                 Ok(bytes_read) => {
+                    // Reset the connection timeout.
+                    self.timer.cancel_timeout(&self.timeout);
+                    self.timeout = self.timer.set_timeout(
+                        Duration::from_float_secs(f64::from(
+                            CONNECTION_TIMEOUT,
+                        )),
+                        TimeoutState::LostConnection,
+                    );
+                    // Handle packet.
                     self.stats.bytes_in += bytes_read as u32;
                     if let Err(err) = self.on_recv(bytes_read) {
                         error!("{}", err);
@@ -400,7 +436,6 @@ impl Client {
         let transition = match self.state {
             ClientState::Connecting {
                 ref mut done,
-                ref timeout,
                 ref cursor,
             } => {
                 // Assumed to be a handshake packet.
@@ -420,7 +455,6 @@ impl Client {
                     PING_RATE,
                 )));
                 // Start the timer for sending input ticks and pings.
-                self.timer.cancel_timeout(timeout);
                 self.timer.set_timeout(tick.interval(), TimeoutState::Tick);
                 self.timer.set_timeout(ping.interval(), TimeoutState::Ping);
 
