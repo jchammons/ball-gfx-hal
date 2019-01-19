@@ -50,6 +50,8 @@ pub enum GameState {
         connecting: Option<ConnectingState>,
     },
     InGame {
+        server_addr: ImString,
+        server_addr_host: ImString,
         server: Option<ServerHandle>,
         client: ClientHandle,
         game: Arc<Game>,
@@ -164,6 +166,8 @@ impl GameState {
 
         match self {
             GameState::MainMenu {
+                ref server_addr,
+                ref server_addr_host,
                 ref mut connecting,
                 ref cursor,
                 ..
@@ -175,6 +179,8 @@ impl GameState {
                 match done {
                     Some((Ok(game), connecting)) => {
                         transition = Some(GameState::InGame {
+                            server_addr: server_addr.clone(),
+                            server_addr_host: server_addr_host.clone(),
                             server: connecting.server,
                             client: connecting.client,
                             cursor: *cursor,
@@ -190,10 +196,26 @@ impl GameState {
                 }
             },
             GameState::InGame {
+                ref server_addr,
+                ref server_addr_host,
                 ref game,
+                ref client,
+                ref server,
+                ref cursor,
                 ..
             } => {
                 game.tick(dt);
+                if client.disconnected() {
+                    if let Some(server) = server {
+                        server.shutdown();
+                    }
+                    transition = Some(GameState::MainMenu {
+                        server_addr: server_addr.clone(),
+                        server_addr_host: server_addr_host.clone(),
+                        cursor: *cursor,
+                        connecting: None,
+                    });
+                }
             },
         };
 

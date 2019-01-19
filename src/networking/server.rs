@@ -12,11 +12,17 @@ use crate::networking::client::{ClientHandshake, ClientPacket};
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
-use crate::networking::{Error, RttEstimator, MAX_PACKET_SIZE, PING_RATE};
+use crate::networking::{
+    Error,
+    RttEstimator,
+    CONNECTION_TIMEOUT,
+    MAX_PACKET_SIZE,
+    PING_RATE,
+};
 use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
-use mio_extras::timer::{self, Timer};
+use mio_extras::timer::{self, Timeout, Timer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -38,6 +44,7 @@ enum TimeoutState {
     GameTick,
     Ping,
     StartRound,
+    LostConnection(SocketAddr),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +76,7 @@ pub struct ServerHandshake {
 struct Client {
     player: PlayerId,
     connection: Connection,
+    timeout: Timeout,
     /// Sequence id of the last input, and the time it was received.
     last_input: (u32, Instant),
     rtt: RttEstimator,
@@ -239,6 +247,15 @@ impl EventHandler for Server {
                         },
                         TimeoutState::Ping => {
                             self.send_ping();
+                        },
+                        TimeoutState::LostConnection(addr) => {
+                            info!("client from {} timed out", addr);
+                            if let Err(err) = self.remove_client(&addr) {
+                                error!(
+                                    "failed to remove client from {}: {}",
+                                    addr, err
+                                );
+                            }
                         },
                     }
                 }
@@ -457,6 +474,10 @@ impl Server {
                 TimeoutState::StartRound,
             );
         }
+        let timeout = self.timer.set_timeout(
+            Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
+            TimeoutState::LostConnection(addr),
+        );
 
         let (player_id, player) =
             self.game.add_player(clamp_cursor(handshake.cursor));
@@ -465,6 +486,7 @@ impl Server {
         self.clients.insert(
             addr,
             Client {
+                timeout,
                 player: player_id,
                 connection,
                 last_input: (0, Instant::now()),
@@ -495,13 +517,14 @@ impl Server {
     }
 
     fn remove_client(&mut self, addr: &SocketAddr) -> Result<(), Error> {
-        let client = self.clients.remove(addr).unwrap();
-        info!("player {} from {} left", client.player, addr);
-        self.game.remove_player(client.player);
+        if let Some(client) = self.clients.remove(addr) {
+            info!("player {} from {} left", client.player, addr);
+            self.game.remove_player(client.player);
 
-        // Send disconnect message to rest of clients.
-        let packet = ServerPacket::PlayerLeft(client.player);
-        self.broadcast(&packet)?;
+            // Send disconnect message to rest of clients.
+            let packet = ServerPacket::PlayerLeft(client.player);
+            self.broadcast(&packet)?;
+        }
 
         Ok(())
     }
@@ -518,6 +541,12 @@ impl Server {
         trace!("got packet from {}: {:?}", addr, &packet);
         match self.clients.get_mut(&addr) {
             Some(client) => {
+                // Reset timeout.
+                self.timer.cancel_timeout(&client.timeout);
+                client.timeout = self.timer.set_timeout(
+                    Duration::from_float_secs(f64::from(CONNECTION_TIMEOUT)),
+                    TimeoutState::LostConnection(addr),
+                );
                 // Existing player.
                 let (packet, sequence, _) =
                     client.connection.decode(Cursor::new(packet))?;

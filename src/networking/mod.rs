@@ -15,6 +15,9 @@ pub const MAX_PACKET_SIZE: usize = 4096;
 /// Rate at which both the client and the server send out pings.
 pub const PING_RATE: f32 = 0.5;
 
+/// Seconds to wait before marking a connection as timed out.
+pub const CONNECTION_TIMEOUT: f32 = 5.0;
+
 /// System to estimate rtt for a connection by periodically sending
 /// pings and recording the time until a response is received.
 #[derive(Default, Debug)]
