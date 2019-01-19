@@ -17,6 +17,10 @@ pub struct NetworkStats {
     pub bytes_out: u32,
     /// Number of bytes received since the last recorded stats.
     pub bytes_in: u32,
+    /// Number of packets sent since the last recorded stats.
+    pub packets_sent: u16,
+    /// Number of packets marked lost since the last recorded stats.
+    pub packets_lost: u16,
     /// Estimated round trip time.
     pub rtt: f32,
 }
@@ -41,6 +45,7 @@ pub struct DebugState {
     network_rx: Receiver<NetworkStats>,
     bandwidth_in_history: [f32; NETWORK_HISTORY_LENGTH],
     bandwidth_out_history: [f32; NETWORK_HISTORY_LENGTH],
+    packet_loss_history: [f32; NETWORK_HISTORY_LENGTH],
     rtt_history: [f32; NETWORK_HISTORY_LENGTH],
     frame_time_history: [f32; FRAME_TIME_HISTORY_LENGTH],
 }
@@ -56,6 +61,7 @@ impl Default for DebugState {
             network_rx,
             bandwidth_in_history: [0.0; NETWORK_HISTORY_LENGTH],
             bandwidth_out_history: [0.0; NETWORK_HISTORY_LENGTH],
+            packet_loss_history: [0.0; NETWORK_HISTORY_LENGTH],
             rtt_history: [0.0; NETWORK_HISTORY_LENGTH],
             frame_time_history: [0.0; FRAME_TIME_HISTORY_LENGTH],
         }
@@ -80,14 +86,20 @@ impl DebugState {
             // Copy elements to make room for new ones.
             self.bandwidth_in_history.copy_within(size.., 0);
             self.bandwidth_out_history.copy_within(size.., 0);
+            self.packet_loss_history.copy_within(size.., 0);
             self.rtt_history.copy_within(size.., 0);
             let start = NETWORK_HISTORY_LENGTH - size;
             for (i, stats) in self.network_rx.try_iter().enumerate() {
-                let bandwidth_in = stats.bytes_in as f32 / NETWORK_STATS_RATE.as_float_secs() as f32;
-                let bandwidth_out = stats.bytes_out as f32 / NETWORK_STATS_RATE.as_float_secs() as f32;
+                let bandwidth_in = stats.bytes_in as f32 /
+                    NETWORK_STATS_RATE.as_float_secs() as f32;
+                let bandwidth_out = stats.bytes_out as f32 /
+                    NETWORK_STATS_RATE.as_float_secs() as f32;
+                let packet_loss =
+                    stats.packets_lost as f32 / stats.packets_sent as f32;
                 // Convert to KB
                 self.bandwidth_in_history[start + i] = bandwidth_in / 1000.0;
                 self.bandwidth_out_history[start + i] = bandwidth_out / 1000.0;
+                self.packet_loss_history[start + i] = packet_loss * 100.0;
                 self.rtt_history[start + i] = stats.rtt * 1000.0;
             }
         }
@@ -105,6 +117,7 @@ impl DebugState {
                 let bandwidth_in = *self.bandwidth_in_history.last().unwrap();
                 let bandwidth_out = *self.bandwidth_out_history.last().unwrap();
                 let rtt = *self.rtt_history.last().unwrap();
+                let packet_loss = *self.packet_loss_history.last().unwrap();
 
                 ui.plot_lines(
                     im_str!("Bandwidth in"),
@@ -135,6 +148,15 @@ impl DebugState {
                     .scale_min(0.0)
                     .overlay_text(&ImString::new(format!("{:.2} ms", rtt)))
                     .build();
+
+                ui.plot_lines(
+                    im_str!("Packet loss"),
+                    &self.packet_loss_history,
+                )
+                .scale_max(100.0)
+                .scale_min(0.0)
+                .overlay_text(&ImString::new(format!("{:.0} %", packet_loss)))
+                .build();
 
                 ui.checkbox(
                     im_str!("Draw latest snapshot"),
