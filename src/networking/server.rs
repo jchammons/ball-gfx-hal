@@ -615,15 +615,15 @@ impl Server {
     }
 
     fn broadcast<P: Serialize>(&mut self, packet: &P) -> Result<(), Error> {
-        self.send_queue.push_back(
-            Packet::new(
+        let packet = Packet::new(
                 self.clients.keys().cloned().collect::<Vec<_>>(),
                 packet,
                 &mut self.clients,
-            )?
-            .unwrap(),
-        );
-        self.reregister_socket(true)?;
+        )?;
+        if let Some(packet) = packet {
+            self.send_queue.push_back(packet);
+            self.reregister_socket(true)?;
+        }
         Ok(())
     }
 
