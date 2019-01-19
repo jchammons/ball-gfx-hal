@@ -1,8 +1,7 @@
-// TODO: implement detecting and resending lost messages
-
 use crate::networking::Error;
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use serde::de::DeserializeOwned;
+use smallvec::SmallVec;
 use std::io::{Read, Write};
 
 // 4 u32s
@@ -21,6 +20,7 @@ pub struct Acks {
 pub struct Connection {
     pub local_sequence: u32,
     pub acks: Acks,
+    pub remote_acks: Acks,
 }
 
 impl Acks {
@@ -39,19 +39,45 @@ impl Acks {
         }
     }
 
+    /// Combines this with another set of acks, and returns the set of
+    /// packets that can now be considered lost.
+    pub fn combine(&mut self, new: Acks) -> SmallVec<[u32; 4]> {
+        let mut lost = SmallVec::new();
+        if new.ack > self.ack {
+            // Anything that is outside the range of the new ack can
+            // be considered lost.
+            let mask = !(!0 >> (new.ack - self.ack));
+            lost.extend(
+                Acks {
+                    ack_bits: !self.ack_bits & mask,
+                    ack: self.ack,
+                }
+                .iter(),
+            );
+
+            // Shift everything.
+            self.ack_bits <<= new.ack - self.ack;
+            self.ack_bits |= new.ack;
+            self.ack = new.ack;
+        } else if self.ack - new.ack <= 32 {
+            self.ack_bits |= new.ack << (self.ack - new.ack);
+        };
+        lost
+    }
+
     /// Checks if a particular sequence number is present in this set
     /// of acks.
     pub fn contains(self, sequence: u32) -> bool {
         if self.ack < sequence {
             return false;
         }
-        self.ack_bits | (1 << (self.ack - sequence)) != 0
+        self.ack_bits & (1 << (self.ack - sequence)) != 0
     }
 
     /// Returns an iterator over the acked packets.
     pub fn iter(self) -> impl Iterator<Item = u32> {
-        (0..32).filter_map(move |offset| {
-            if self.ack_bits | (1 << offset) != 0 {
+        (0..32.min(self.ack)).filter_map(move |offset| {
+            if self.ack_bits & (1 << offset) != 0 {
                 Some(self.ack - offset)
             } else {
                 None
@@ -66,19 +92,17 @@ impl Connection {
     pub fn recv_header<B: Read>(
         &mut self,
         mut packet: B,
-    ) -> Result<(u32, Acks), Error> {
+    ) -> Result<(u32, SmallVec<[u32; 4]>), Error> {
         let sequence = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack_bits = packet.read_u32::<BE>().map_err(Error::header_read)?;
 
         self.acks.ack(sequence);
-        Ok((
-            sequence,
-            Acks {
-                ack_bits,
-                ack,
-            },
-        ))
+        let lost = self.remote_acks.combine(Acks {
+            ack_bits,
+            ack,
+        });
+        Ok((sequence, lost))
     }
 
     pub fn send_header<B: Write>(
@@ -96,14 +120,15 @@ impl Connection {
     }
 
     /// Reads the header of a packet, and then deserializes the
-    /// contents with serde.
+    /// contents with serde. Returns the sequence numbers of packets
+    /// that are now considered lost.
     pub fn decode<B: Read, P: DeserializeOwned>(
         &mut self,
         mut read: B,
-    ) -> Result<(P, u32, Acks), Error> {
-        let (sequence, acks) = self.recv_header(&mut read)?;
+    ) -> Result<(P, u32, SmallVec<[u32; 4]>), Error> {
+        let (sequence, lost) = self.recv_header(&mut read)?;
         let packet =
-            bincode::deserialize_from(&mut read).map_err(Error::deserialize)?;
-        Ok((packet, sequence, acks))
+            bincode::deserialize_from(read).map_err(Error::deserialize)?;
+        Ok((packet, sequence, lost))
     }
 }

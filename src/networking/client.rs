@@ -335,9 +335,10 @@ impl Client {
                         break;
                     }
                 },
-                // Pretty sure this never happens?
                 Ok(bytes_written) => {
+                    self.stats.packets_sent += 1;
                     self.stats.bytes_out += bytes_written as u32;
+                    // Pretty sure this never happens?
                     if bytes_written < packet.len() {
                         error!(
                             "Only wrote {} out of {} bytes for client packet: \
@@ -422,9 +423,10 @@ impl Client {
                 ref cursor,
             } => {
                 // Assumed to be a handshake packet.
-                let (handshake, ..) = self
+                let (handshake, _, lost) = self
                     .connection
                     .decode::<_, ServerHandshake>(Cursor::new(packet))?;
+                self.stats.packets_lost += lost.len() as u16;
                 let (game, game_handle) = Game::new(
                     handshake.players,
                     handshake.snapshot,
@@ -455,8 +457,9 @@ impl Client {
                 ref mut rtt,
                 ..
             } => {
-                let (packet, sequence, _) =
+                let (packet, sequence, lost) =
                     self.connection.decode(Cursor::new(packet))?;
+                self.stats.packets_lost += lost.len() as u16;
                 match packet {
                     ServerPacket::Event(event) => game.event(event),
                     ServerPacket::Pong(sequence) => {
