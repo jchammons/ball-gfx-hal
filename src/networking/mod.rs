@@ -18,6 +18,9 @@ pub const PING_RATE: f32 = 0.5;
 /// Seconds to wait before marking a connection as timed out.
 pub const CONNECTION_TIMEOUT: f32 = 5.0;
 
+/// Rate at which the server sends snapshots.
+pub const SNAPSHOT_RATE: f32 = 1.0 / 30.0;
+
 /// System to estimate rtt for a connection by periodically sending
 /// pings and recording the time until a response is received.
 #[derive(Default, Debug)]

@@ -1,17 +1,17 @@
 use crate::game::{
-    AtomicRoundState,
+    Event,
     GetPlayer,
     Input,
-    InputBuffer,
     InterpolatedSnapshot,
     PlayerId,
     PlayerState,
+    RoundState,
     Snapshot,
     SnapshotView,
     StaticPlayerState,
 };
-use crate::networking::server;
-use log::warn;
+use crate::networking::SNAPSHOT_RATE;
+use log::{info, warn};
 use nalgebra::Point2;
 use parking_lot::Mutex;
 use std::borrow::Cow;
@@ -35,12 +35,10 @@ pub struct Players<'a, S> {
 pub struct Game {
     players: Mutex<HashMap<PlayerId, StaticPlayerState>>,
     snapshots: Mutex<VecDeque<(Snapshot, Instant)>>,
-    pub round: AtomicRoundState,
-    pub input_buffer: Mutex<InputBuffer>,
+    round: Mutex<RoundState>,
+    cursor: Mutex<Point2<f32>>,
     /// Player id for this client.
     player_id: PlayerId,
-    /* /// Predicted state of this client.
-     * cursor: Mutex<Point2<f32>>, */
 }
 
 impl<'a, 'b> GetPlayer for &'b Player<'a> {
@@ -122,97 +120,58 @@ impl Game {
         Game {
             players: Mutex::new(players),
             snapshots: Mutex::new(snapshots),
-            input_buffer: Mutex::new(InputBuffer::new(Input {
-                cursor,
-            })),
-            round: AtomicRoundState::default(),
+            cursor: Mutex::new(cursor),
+            round: Mutex::new(RoundState::default()),
             player_id,
             // predicted: Mutex::new(PlayerState::new(clamp_cursor(cursor))),
         }
     }
 
+    /// Handles an event from the server.
+    pub fn handle_event(&self, event: Event) {
+        match event {
+            Event::RoundState(round) => {
+                info!("transitioning to round state {:?}", round);
+                *self.round.lock() = round
+            },
+            Event::NewPlayer {
+                id,
+                static_state,
+            } => {
+                info!("new player {}", id);
+                self.players.lock().insert(id, static_state);
+            },
+            Event::RemovePlayer(id) => {
+                info!("removing player {}", id);
+                if self.players.lock().remove(&id).is_none() {
+                    warn!(
+                        "attempting to remove player that was never added ({})",
+                        id
+                    );
+                }
+            },
+            Event::Snapshot(snapshot) => {
+                let mut snapshots = self.snapshots.lock();
+                snapshots.push_back((snapshot, Instant::now()));
+            },
+        }
+    }
+
     /// Steps client prediction forward in time.
-    pub fn tick(&self, _dt: f32) {
-        // let mut predicted = self.predicted.lock();
-        // for dt in step_dt(dt, 1.0 / 60.0) {
-        // predicted.tick(dt);
-        // }
+    pub fn tick(&self, dt: f32) {
+        self.round.lock().tick(dt);
     }
 
     /// Updates the cursor position for this client player.
     pub fn update_cursor(&self, cursor: Point2<f32>) {
-        // self.predicted.lock().cursor = clamp_cursor(cursor);
-        self.input_buffer.lock().store_input(
-            Input {
-                cursor,
-            },
-            Instant::now(),
-        );
+        *self.cursor.lock() = cursor;
     }
 
-    /// Adds a new joined player.
-    pub fn add_player(&self, id: PlayerId, static_state: StaticPlayerState) {
-        self.players.lock().insert(id, static_state);
-    }
-
-    /// Removes a player.
-    pub fn remove_player(&self, id: PlayerId) {
-        if self.players.lock().remove(&id).is_none() {
-            warn!("attempting to remove player that was never added ({})", id);
+    /// Gets the most recent input to send to the server.
+    pub fn latest_input(&self) -> Input {
+        Input {
+            cursor: *self.cursor.lock(),
         }
-    }
-
-    /// Handles a snapshot received from the server.
-    ///
-    /// `input_delay` is the time in seconds since the last received
-    /// input used to generate the snapshot.
-    pub fn insert_snapshot(&self, snapshot: Snapshot, _input_delay: f32) {
-        // TODO!
-
-        // Remove the client's player from the snapshot, and reconcile
-        // predicted state.
-        // if let Some(player) = snapshot.players.get(&self.player_id) {
-        // let input_buffer = self.input_buffer.lock();
-        // Update the predicted big ball position/velocity.
-        // let mut ball = player.ball;
-        // let mut cursor = player.cursor;
-        //
-        // Fast-forward through all unacknowledged inputs. //
-        // for (input, dt) in input_buffer.inputs() { //
-        // Only take input delay into account for the //
-        // first input. //
-        // let dt = (dt - input_delay).max(0.0); //
-        // input_delay -= dt; //
-        //
-        // debug!("replaying input: {:?} {}", input, dt); //
-        // for dt in step_dt(dt, 1.0 / 60.0) { //
-        // ball.tick(dt, cursor); //
-        // } //
-        // cursor = input.cursor; //
-        // } //
-        // let dt = //
-        // (input_buffer.delay(Instant::now()) - input_delay).max(0.0); //
-        // for dt in step_dt(dt, 1.0 / 60.0) { //
-        // ball.tick(dt, cursor); //
-        // }
-        // Since the protocol only sends over the latest
-        // input, that's the only thing we need to predict.
-        // let dt: f32 = input_buffer.inputs().map(|(_, dt)| dt).sum();
-        // if let Some((input, _)) = input_buffer.inputs().last() {
-        // let dt = (dt - input_delay).max(0.0);
-        // let dt = input_delay;
-        // cursor = input.cursor;
-        // TODO possibly just use calculus here instead
-        // for dt in step_dt(dt, 1.0 / 60.0) {
-        // ball.tick(dt, cursor);
-        // }
-        // }
-        // let mut predicted = self.predicted.lock();
-        // predicted.ball = ball;
-        // }
-
-        let mut snapshots = self.snapshots.lock();
-        snapshots.push_back((snapshot, Instant::now()));
     }
 
     /// Processes the set of players corresponding to the most recent snapshot.
@@ -251,10 +210,8 @@ impl Game {
         process: F,
     ) -> O {
         let mut snapshots = self.snapshots.lock();
-        let delayed_time = time -
-            Duration::from_float_secs(f64::from(
-                delay * server::SNAPSHOT_RATE,
-            ));
+        let delayed_time =
+            time - Duration::from_float_secs(f64::from(delay * SNAPSHOT_RATE));
 
         // Get rid of old snapshots.
         while snapshots.len() > 1 && delayed_time > snapshots[1].1 {
