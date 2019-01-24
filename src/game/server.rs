@@ -44,7 +44,7 @@ pub struct Player {
 #[derive(Clone, Debug, Default)]
 pub struct Game {
     pub players: HashMap<PlayerId, Player>,
-    round: RoundState,
+    pub round: RoundState,
     next_id: PlayerId,
 }
 

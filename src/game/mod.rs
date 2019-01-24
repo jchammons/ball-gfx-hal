@@ -1,4 +1,5 @@
 use crate::graphics::Circle;
+use enum_kinds::EnumKind;
 use nalgebra::{self, Point2, Vector2};
 use palette::LinSrgb;
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,8 @@ const BALL_START_SPEED: f32 = 1.0;
 pub type PlayerId = u16;
 
 /// Finite state machine for the round state.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, EnumKind)]
+#[enum_kind(RoundStateKind)]
 pub enum RoundState {
     /// Less than two players, so nothing happens.
     Lobby,

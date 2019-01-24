@@ -5,7 +5,7 @@ use crate::game::{
 };
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
-use crate::networking::server::{ServerHandshake, ServerPacket};
+use crate::networking::server::ServerPacket;
 use crate::networking::tick::Interval;
 use crate::networking::{
     Error,
@@ -45,16 +45,14 @@ enum TimeoutState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
+    Handshake {
+        /// Cursor position when connecting.
+        cursor: Point2<f32>,
+    },
     Input(Input),
     Disconnect,
     Ping,
     Pong(u32),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ClientHandshake {
-    /// Cursor position when connecting.
-    pub cursor: Point2<f32>,
 }
 
 pub enum ClientState {
@@ -288,7 +286,7 @@ impl Client {
         };
 
         // Send handshake
-        client.send(&ClientHandshake {
+        client.send(&ClientPacket::Handshake {
             cursor,
         })?;
 
@@ -416,52 +414,60 @@ impl Client {
             return Err(Error::PacketTooLarge(bytes_read));
         }
         let packet = &self.recv_buffer[0..bytes_read];
+        let (packet, sequence, _, lost) =
+            self.connection.decode(Cursor::new(packet))?;
+        self.stats.packets_lost += lost.len() as u16;
 
         let transition = match self.state {
             ClientState::Connecting {
                 ref mut done,
                 ref cursor,
             } => {
-                // Assumed to be a handshake packet.
-                let (handshake, _, lost) = self
-                    .connection
-                    .decode::<_, ServerHandshake>(Cursor::new(packet))?;
-                self.stats.packets_lost += lost.len() as u16;
-                let (game, game_handle) = Game::new(
-                    handshake.players,
-                    handshake.snapshot,
-                    handshake.id,
-                    *cursor,
-                );
-                let tick = Interval::new(TICK_RATE);
-                let ping = Interval::new(PING_RATE);
-                // Start the timer for sending input ticks and pings.
-                self.timer.set_timeout(tick.interval(), TimeoutState::Tick);
-                self.timer.set_timeout(ping.interval(), TimeoutState::Ping);
+                match packet {
+                    ServerPacket::Handshake {
+                        players,
+                        snapshot,
+                        id,
+                    } => {
+                        let (game, game_handle) =
+                            Game::new(players, snapshot, id, *cursor);
+                        let tick = Interval::new(TICK_RATE);
+                        let ping = Interval::new(PING_RATE);
+                        // Start the timer for sending input ticks and pings.
+                        self.timer
+                            .set_timeout(tick.interval(), TimeoutState::Tick);
+                        self.timer
+                            .set_timeout(ping.interval(), TimeoutState::Ping);
 
-                // Signal the main thread that connection finished.
-                done.send(Ok(game)).unwrap();
+                        // Signal the main thread that connection finished.
+                        done.send(Ok(game)).unwrap();
 
-                info!("completed connection to server");
-                // Transition to connected state.
-                Some(ClientState::Connected {
-                    game: game_handle,
-                    tick,
-                    ping,
-                    rtt: RttEstimator::default(),
-                })
+                        info!("completed connection to server");
+                        // Transition to connected state.
+                        Some(ClientState::Connected {
+                            game: game_handle,
+                            tick,
+                            ping,
+                            rtt: RttEstimator::default(),
+                        })
+                    },
+                    // Ignore non-handshake packets
+                    _ => {
+                        warn!("received {:?} before handshake", packet);
+                        None
+                    },
+                }
             },
-
             ClientState::Connected {
                 ref mut game,
                 ref mut rtt,
                 ..
             } => {
-                let (packet, sequence, lost) =
-                    self.connection.decode(Cursor::new(packet))?;
-                self.stats.packets_lost += lost.len() as u16;
                 match packet {
                     ServerPacket::Event(event) => game.event(event),
+                    ServerPacket::Handshake {
+                        ..
+                    } => warn!("received a second handshake packet"),
                     ServerPacket::Pong(sequence) => {
                         rtt.pong(sequence);
                     },
@@ -481,7 +487,7 @@ impl Client {
         Ok(())
     }
 
-    fn send<P: Serialize>(&mut self, contents: &P) -> Result<u32, Error> {
+    fn send(&mut self, contents: &ClientPacket) -> Result<u32, Error> {
         // Don't send any additional packets while shutting down.
         if self.needs_shutdown {
             return Err(Error::ShuttingDown);

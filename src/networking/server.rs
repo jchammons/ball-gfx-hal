@@ -4,10 +4,11 @@ use crate::game::{
     Event,
     GetPlayer,
     PlayerId,
+    RoundStateKind,
     Snapshot,
     StaticPlayerState,
 };
-use crate::networking::client::{ClientHandshake, ClientPacket};
+use crate::networking::client::ClientPacket;
 use crate::networking::connection::{Connection, HEADER_BYTES};
 use crate::networking::event_loop::{run_event_loop, EventHandler};
 use crate::networking::tick::Interval;
@@ -23,6 +24,7 @@ use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
 use mio::{self, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use mio_extras::timer::{self, Timeout, Timer};
+use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -51,13 +53,11 @@ pub enum ServerPacket {
     Event(Event),
     Ping,
     Pong(u32),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ServerHandshake {
-    pub id: PlayerId,
-    pub players: HashMap<PlayerId, StaticPlayerState>,
-    pub snapshot: Snapshot,
+    Handshake {
+        id: PlayerId,
+        players: HashMap<PlayerId, StaticPlayerState>,
+        snapshot: Snapshot,
+    },
 }
 
 struct Client {
@@ -65,26 +65,15 @@ struct Client {
     connection: Connection,
     timeout: Timeout,
     rtt: RttEstimator,
-}
-
-/// Contains a message and a list of clients to send the message to.
-struct Packet {
-    /// Current client with the correct header.
-    pub client: SocketAddr,
-    /// Clients left to send to.
-    remaining: Vec<SocketAddr>,
-    /// The packet is assumed to have room reserved at the front for a
-    /// header. Every time a new client is sent to, these bytes get
-    /// overwritten with the new header. This means that the previous
-    /// `packet` stops being correct.
-    pub packet: Vec<u8>,
+    last_input: u32,
+    reliable: HashMap<u32, ServerPacket>,
 }
 
 pub struct Server {
     socket: UdpSocket,
     timer: Timer<TimeoutState>,
     recv_buffer: [u8; MAX_PACKET_SIZE],
-    send_queue: VecDeque<Packet>,
+    send_queue: VecDeque<(SocketAddr, Vec<u8>)>,
     clients: HashMap<SocketAddr, Client>,
     game: Game,
     send_tick: Interval,
@@ -129,77 +118,59 @@ impl Drop for ServerHandle {
     }
 }
 
-impl Packet {
-    /// Constructs a new packet for a single client.
-    pub fn single_client<P: Serialize>(
-        addr: SocketAddr,
-        client: &mut Client,
-        contents: &P,
-    ) -> Result<(Packet, u32), Error> {
-        // Write header and contents
-        let size = bincode::serialized_size(contents)
-            .map_err(Error::serialize)? as usize;
-        let mut packet = Vec::with_capacity(size + HEADER_BYTES);
-        let sequence = client.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents)
-            .map_err(Error::serialize)?;
-
-        Ok((
-            Packet {
-                client: addr,
-                remaining: Vec::new(),
-                packet,
+impl ServerPacket {
+    fn reliable(&self) -> bool {
+        match self {
+            ServerPacket::Event(event) => {
+                match event {
+                    Event::NewPlayer {
+                        ..
+                    } => true,
+                    Event::RemovePlayer(_) => true,
+                    Event::RoundState(_) => true,
+                    Event::Snapshot(_) => false,
+                }
             },
-            sequence,
-        ))
-    }
-
-    /// Poossibly constructs a new packet, but returns `None` if
-    /// `clients` is empty.
-    pub fn new<I: IntoIterator<Item = SocketAddr>, P: Serialize>(
-        clients: I,
-        contents: &P,
-        clients_state: &mut HashMap<SocketAddr, Client>,
-    ) -> Result<Option<Packet>, Error> {
-        // Determine first client, to write the header for.
-        let mut clients = clients.into_iter();
-        let client = match clients.next() {
-            Some(client) => client,
-            None => return Ok(None),
-        };
-
-        // Write header and contents
-        let size = bincode::serialized_size(contents)
-            .map_err(Error::serialize)? as usize;
-        let mut packet = Vec::with_capacity(size + HEADER_BYTES);
-        let client_state = clients_state.get_mut(&client).unwrap();
-        client_state.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents)
-            .map_err(Error::serialize)?;
-
-        Ok(Some(Packet {
-            client,
-            remaining: clients.collect(),
-            packet,
-        }))
-    }
-
-    pub fn next_packet(
-        &mut self,
-        clients_state: &mut HashMap<SocketAddr, Client>,
-    ) -> Result<bool, Error> {
-        match self.remaining.pop() {
-            Some(client) => {
-                self.client = client;
-                // Write the new header.
-                let connection =
-                    &mut clients_state.get_mut(&client).unwrap().connection;
-                let cursor = Cursor::new(&mut self.packet[..HEADER_BYTES]);
-                connection.send_header(cursor)?;
-                Ok(true)
-            },
-            None => Ok(false),
+            ServerPacket::Handshake {
+                ..
+            } => true,
+            ServerPacket::Ping => false,
+            ServerPacket::Pong(_) => false,
         }
+    }
+
+    fn resend(&self, game: &Game) -> bool {
+        match self {
+            ServerPacket::Event(Event::RoundState(round)) => {
+                // Only resend if the round state hasn't
+                // changed again since it was sent.
+                RoundStateKind::from(round) == RoundStateKind::from(game.round)
+            },
+            // Everything else is simple.
+            _ => self.reliable(),
+        }
+    }
+}
+
+impl Client {
+    /// Encodes a packet and possibly saves it in the reliable packet
+    /// buffer.
+    ///
+    /// Returns the sequence number.
+    fn encode(
+        &mut self,
+        packet: &ServerPacket,
+    ) -> Result<(Vec<u8>, u32), Error> {
+        let size = bincode::serialized_size(packet).map_err(Error::serialize)?
+            as usize;
+        let mut data = Vec::with_capacity(size + HEADER_BYTES);
+        let sequence = self.connection.send_header(&mut data)?;
+        bincode::serialize_into(&mut data, packet).map_err(Error::serialize)?;
+
+        if packet.reliable() {
+            self.reliable.insert(sequence, packet.clone());
+        }
+        Ok((data, sequence))
     }
 }
 
@@ -315,44 +286,36 @@ impl Server {
     }
 
     fn socket_writable(&mut self) {
-        while let Some(packet) = self.send_queue.front_mut() {
-            match self.socket.send_to(&packet.packet, &packet.client) {
+        while let Some(&(ref addr, ref packet)) = self.send_queue.front() {
+            match self.socket.send_to(packet, addr) {
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
                         error!(
                             "error sending packet to {} ({}): {:?}",
-                            &packet.client, err, &packet.packet
+                            addr, err, packet
                         );
+                        self.send_queue.pop_front();
                     }
                     break;
                 },
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
-                    if bytes_written < packet.packet.len() {
+                    if bytes_written < packet.len() {
                         error!(
                             "only wrote {} out of {} bytes for packet to {}: \
                              {:?}",
                             bytes_written,
-                            packet.packet.len(),
-                            &packet.client,
-                            &packet.packet
+                            packet.len(),
+                            addr,
+                            packet
                         )
                     }
                 },
             }
 
-            // If it got here, the packet must have actually been sent.
-            match packet.next_packet(&mut self.clients) {
-                Ok(true) => {
-                    // Continue as usual.
-                },
-                Ok(false) => {
-                    self.send_queue.pop_front().unwrap();
-                },
-                Err(err) => {
-                    error!("error writing header for packet: {}", err);
-                },
-            }
+            // Only pop after making sure it didn't return
+            // WouldBlock.
+            self.send_queue.pop_front();
         }
 
         if self.send_queue.is_empty() {
@@ -380,22 +343,21 @@ impl Server {
         self.timer.set_timeout(interval, TimeoutState::Ping);
 
         for (&addr, client) in self.clients.iter_mut() {
-            let (packet, sequence) = match Packet::single_client(
-                addr,
-                client,
-                &ServerPacket::Ping,
-            ) {
+            let (packet, sequence) = match client.encode(&ServerPacket::Ping) {
                 Ok(result) => result,
                 Err(err) => {
                     error!(
-                        "error initializing ping packet for client {}: {}",
+                        "error encoding ping packet for client {}: {}",
                         addr, err
                     );
                     continue;
                 },
             };
-            self.send_queue.push_back(packet);
+            self.send_queue.push_back((addr, packet));
             client.rtt.ping(sequence, now);
+        }
+        if let Err(err) = self.reregister_socket(true) {
+            error!("failed to reregister socket as writable: {}", err);
         }
     }
 
@@ -431,7 +393,7 @@ impl Server {
         &mut self,
         addr: SocketAddr,
         connection: Connection,
-        handshake: &ClientHandshake,
+        cursor: Point2<f32>,
     ) -> Result<(), Error> {
         info!("new player from {}", addr);
 
@@ -440,23 +402,21 @@ impl Server {
             TimeoutState::LostConnection(addr),
         );
 
-        let (player_id, events) =
-            self.game.add_player(clamp_cursor(handshake.cursor));
+        let (player_id, events) = self.game.add_player(clamp_cursor(cursor));
         self.send_events(events)?;
 
         // Now start processing this client.
-        self.clients.insert(
-            addr,
-            Client {
-                timeout,
-                player: player_id,
-                connection,
-                rtt: RttEstimator::default(),
-            },
-        );
+        let client = self.clients.entry(addr).or_insert(Client {
+            timeout,
+            player: player_id,
+            connection,
+            rtt: RttEstimator::default(),
+            last_input: 0,
+            reliable: HashMap::new(),
+        });
 
         // Send handshake message to the new client.
-        let packet = ServerHandshake {
+        let packet = ServerPacket::Handshake {
             id: player_id,
             players: self
                 .game
@@ -465,7 +425,9 @@ impl Server {
                 .collect(),
             snapshot: self.game.snapshot(),
         };
-        self.send_to(addr, &packet)?;
+        let (packet, _) = client.encode(&packet)?;
+        self.send_queue.push_back((addr, packet));
+        self.reregister_socket(true)?;
 
         Ok(())
     }
@@ -485,6 +447,9 @@ impl Server {
         addr: SocketAddr,
         bytes_read: usize,
     ) -> Result<(), Error> {
+        let mut reregister = false;
+
+        // Reset timeout.
         if bytes_read > MAX_PACKET_SIZE {
             return Err(Error::PacketTooLarge(bytes_read));
         }
@@ -500,27 +465,57 @@ impl Server {
                 );
 
                 // Existing player.
-                let (packet, sequence, _) =
+                let (packet, sequence, acks, lost) =
                     client.connection.decode(Cursor::new(packet))?;
+
+                // Remove acked packets from the reliable packet
+                // buffer.
+                for ack in acks.iter() {
+                    client.reliable.remove(&ack);
+                }
+
+                // Possibly resend any lost packets.
+                for lost in lost.into_iter() {
+                    if let Some(packet) = client.reliable.remove(&lost) {
+                        if packet.resend(&self.game) {
+                            debug!(
+                                "resending lost packet to {:?}: {:?}",
+                                addr, packet
+                            );
+                            let (packet, _) = client.encode(&packet)?;
+                            self.send_queue.push_back((addr, packet));
+                            reregister = true;
+                        }
+                    }
+                }
+
                 match packet {
                     ClientPacket::Input(input) => {
-                        self.game.set_player_cursor(
-                            client.player,
-                            clamp_cursor(input.cursor),
-                        );
+                        // Ignore out of order input packets.
+                        if sequence > client.last_input {
+                            client.last_input = sequence;
+                            self.game.set_player_cursor(
+                                client.player,
+                                clamp_cursor(input.cursor),
+                            );
+                        }
+                    },
+                    ClientPacket::Handshake {
+                        ..
+                    } => {
+                        warn!(
+                            "received a second handshake packet from {:?}",
+                            addr
+                        )
                     },
                     ClientPacket::Disconnect => {
                         self.remove_client(&addr)?;
                     },
                     ClientPacket::Ping => {
-                        self.send_queue.push_back(
-                            Packet::single_client(
-                                addr,
-                                client,
-                                &ServerPacket::Pong(sequence),
-                            )?
-                            .0,
-                        );
+                        let (packet, _) =
+                            client.encode(&ServerPacket::Pong(sequence))?;
+                        self.send_queue.push_back((addr, packet));
+                        reregister = true;
                     },
                     ClientPacket::Pong(sequence) => {
                         client.rtt.pong(sequence);
@@ -530,9 +525,19 @@ impl Server {
             None => {
                 // New player.
                 let mut connection = Connection::default();
-                let (handshake, ..) = connection.decode(Cursor::new(packet))?;
-                self.new_client(addr, connection, &handshake)?;
+                let (packet, ..) = connection.decode(Cursor::new(packet))?;
+                // Ignore non-handshake packets.
+                if let ClientPacket::Handshake {
+                    cursor,
+                } = packet
+                {
+                    self.new_client(addr, connection, cursor)?;
+                }
             },
+        }
+
+        if reregister {
+            self.reregister_socket(true)?;
         }
 
         Ok(())
@@ -550,26 +555,23 @@ impl Server {
             .map_err(Error::poll_register)
     }
 
-    fn send_to<P: Serialize>(
-        &mut self,
-        addr: SocketAddr,
-        packet: &P,
-    ) -> Result<(), Error> {
-        self.send_queue.push_back(
-            Packet::new(Some(addr), packet, &mut self.clients)?.unwrap(),
-        );
-        self.reregister_socket(true)?;
-        Ok(())
-    }
+    fn broadcast(&mut self, packet: &ServerPacket) -> Result<(), Error> {
+        if !self.clients.is_empty() {
+            let data = bincode::serialize(packet).map_err(Error::serialize)?;
 
-    fn broadcast<P: Serialize>(&mut self, packet: &P) -> Result<(), Error> {
-        let packet = Packet::new(
-            self.clients.keys().cloned().collect::<Vec<_>>(),
-            packet,
-            &mut self.clients,
-        )?;
-        if let Some(packet) = packet {
-            self.send_queue.push_back(packet);
+            for (&addr, client) in self.clients.iter_mut() {
+                let mut with_header =
+                    Vec::with_capacity(data.len() + HEADER_BYTES);
+                let sequence =
+                    client.connection.send_header(&mut with_header)?;
+                with_header.extend_from_slice(&data);
+                self.send_queue.push_back((addr, with_header));
+
+                if packet.reliable() {
+                    client.reliable.insert(sequence, packet.clone());
+                }
+            }
+
             self.reregister_socket(true)?;
         }
         Ok(())
