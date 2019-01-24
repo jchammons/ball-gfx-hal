@@ -120,6 +120,7 @@ impl GameState {
                 ref mut cursor,
                 ..
             } => {
+                #[allow(clippy::single_match)]
                 match event {
                     WindowEvent::CursorMoved {
                         position,

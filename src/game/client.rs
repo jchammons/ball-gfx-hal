@@ -160,7 +160,7 @@ impl Game {
             match event {
                 Event::RoundState(round) => {
                     info!("transitioning to round state {:?}", round);
-                    self.round;
+                    self.round = round;
                 },
                 Event::NewPlayer {
                     id,
