@@ -88,21 +88,23 @@ impl Acks {
 
 impl Connection {
     /// Processes the header of a received packet and returns it's
-    /// sequence number, as well as acknowledged packets.
+    /// sequence number, as well as acknowledged packets and lost
+    /// packets.
     pub fn recv_header<B: Read>(
         &mut self,
         mut packet: B,
-    ) -> Result<(u32, SmallVec<[u32; 4]>), Error> {
+    ) -> Result<(u32, Acks, SmallVec<[u32; 4]>), Error> {
         let sequence = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack = packet.read_u32::<BE>().map_err(Error::header_read)?;
         let ack_bits = packet.read_u32::<BE>().map_err(Error::header_read)?;
 
         self.acks.ack(sequence);
-        let lost = self.remote_acks.combine(Acks {
+        let acks = Acks {
             ack_bits,
             ack,
-        });
-        Ok((sequence, lost))
+        };
+        let lost = self.remote_acks.combine(acks);
+        Ok((sequence, acks, lost))
     }
 
     pub fn send_header<B: Write>(
@@ -125,10 +127,10 @@ impl Connection {
     pub fn decode<B: Read, P: DeserializeOwned>(
         &mut self,
         mut read: B,
-    ) -> Result<(P, u32, SmallVec<[u32; 4]>), Error> {
-        let (sequence, lost) = self.recv_header(&mut read)?;
+    ) -> Result<(P, u32, Acks, SmallVec<[u32; 4]>), Error> {
+        let (sequence, acks, lost) = self.recv_header(&mut read)?;
         let packet =
             bincode::deserialize_from(read).map_err(Error::deserialize)?;
-        Ok((packet, sequence, lost))
+        Ok((packet, sequence, acks, lost))
     }
 }
