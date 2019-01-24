@@ -94,8 +94,8 @@ impl DebugState {
                     NETWORK_STATS_RATE.as_float_secs() as f32;
                 let bandwidth_out = stats.bytes_out as f32 /
                     NETWORK_STATS_RATE.as_float_secs() as f32;
-                let packet_loss =
-                    stats.packets_lost as f32 / stats.packets_sent as f32;
+                let packet_loss = f32::from(stats.packets_lost) /
+                    f32::from(stats.packets_sent);
                 // Convert to KB
                 self.bandwidth_in_history[start + i] = bandwidth_in / 1000.0;
                 self.bandwidth_out_history[start + i] = bandwidth_out / 1000.0;
