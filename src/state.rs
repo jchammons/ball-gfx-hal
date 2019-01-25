@@ -35,6 +35,7 @@ struct Connecting {
 }
 
 pub struct GameState {
+    error_text: Option<ImString>,
     server_addr: ImString,
     server_addr_host: ImString,
     cursor: Point2<f32>,
@@ -88,6 +89,7 @@ impl Connecting {
 impl Default for GameState {
     fn default() -> GameState {
         GameState {
+            error_text: None,
             server_addr: ImString::with_capacity(64),
             server_addr_host: ImString::new("0.0.0.0:6666"),
             cursor: Point2::new(0.0, 0.0),
@@ -139,6 +141,7 @@ impl GameState {
     }
 
     pub fn update(&mut self, dt: f32) {
+        let error_text = &mut self.error_text;
         let transition = match self.screen {
             Screen::MainMenu {
                 connecting: ref mut connecting_persist,
@@ -156,7 +159,12 @@ impl GameState {
                         },
                         Ok(Err(err)) => {
                             if let Some(err) = err {
-                                error!("client connection failed: {}", err);
+                                let err = format!(
+                                    "client connection failed: {}",
+                                    err
+                                );
+                                error!("{}", err);
+                                *error_text = Some(ImString::new(err));
                             }
                             None
                         },
@@ -166,7 +174,7 @@ impl GameState {
                         },
                     }
                 })
-            }
+            },
             Screen::InGame {
                 ref mut game,
                 ref mut done,
@@ -180,14 +188,24 @@ impl GameState {
                     .and_then(|server| {
                         server.done.try_recv().ok().map(|err| {
                             if let Some(err) = err {
-                                error!("server stopped with error: {}", err);
+                                let err = format!(
+                                    "server stopped with error: {}",
+                                    err
+                                );
+                                error!("{}", err);
+                                *error_text = Some(ImString::new(err));
                             }
                         })
                     })
                     .or_else(|| {
                         done.try_recv().ok().map(|err| {
                             if let Some(err) = err {
-                                error!("client stopped with error: {}", err);
+                                let err = format!(
+                                    "client stopped with error: {}",
+                                    err
+                                );
+                                error!("{}", err);
+                                *error_text = Some(ImString::new(err));
                             }
                         })
                     })
@@ -254,17 +272,41 @@ impl GameState {
     }
 
     pub fn ui<'a>(&mut self, ui: &Ui<'a>, debug: &DebugState) {
+        if let Some(ref err) = self.error_text {
+            ui.open_popup(im_str!("error"));
+            let mut open = true;
+            ui.popup_modal(im_str!("error")).build(|| {
+                ui.text_wrapped(err);
+                if ui.small_button(im_str!("OK")) {
+                    ui.close_current_popup();
+                    open = false;
+                }
+                // This is to force the window size up to a certain
+                // point. Blocked on:
+                // https://github.com/Gekkio/imgui-rs/issues/201.
+                ui.dummy((500.0, 0.0));
+            });
+            if !open {
+                self.error_text = None;
+            }
+        }
+
         match self.screen {
             Screen::MainMenu {
                 ref mut connecting,
             } => {
                 let server_addr = &mut self.server_addr;
                 let server_addr_host = &mut self.server_addr_host;
+                let error_text = &mut self.error_text;
                 let cursor = self.cursor;
                 ui.window(im_str!("Main Menu")).always_auto_resize(true).build(
                     || {
                         if connecting.is_some() {
                             ui.text(im_str!("Connecting..."));
+                            ui.same_line(0.0);
+                            if ui.small_button(im_str!("Cancel")) {
+                                *connecting = None;
+                            }
                             ui.separator();
                         }
 
@@ -278,18 +320,24 @@ impl GameState {
                                     ) {
                                         Ok(state) => *connecting = Some(state),
                                         Err(err) => {
-                                            error!(
-                                                "error hosting server: {}",
+                                            let err = format!(
+                                                "error connecting to server: \
+                                                 {}",
                                                 err
-                                            )
+                                            );
+                                            error!("{}", err);
+                                            *error_text =
+                                                Some(ImString::new(err));
                                         },
                                     }
                                 },
                                 Err(_) => {
-                                    warn!(
-                                        "Couldn't parse server address: {}",
+                                    let err = format!(
+                                        "couldn't parse server address: {}",
                                         server_addr.to_str()
-                                    )
+                                    );
+                                    warn!("{}", err);
+                                    *error_text = Some(ImString::new(err));
                                 },
                             }
                         }
@@ -308,20 +356,24 @@ impl GameState {
                                     {
                                         Ok(state) => *connecting = Some(state),
                                         Err(err) => {
-                                            error!(
-                                                "error connecting to server: \
-                                                 {}",
+                                            let err = format!(
+                                                "error hosting server: {}",
                                                 err
-                                            )
+                                            );
+                                            error!("{}", err);
+                                            *error_text =
+                                                Some(ImString::new(err));
                                         },
                                     }
                                 },
                                 Err(_) => {
-                                    warn!(
+                                    let err = format!(
                                         "Couldn't parse server hosting \
                                          address: {}",
                                         server_addr_host.to_str()
-                                    )
+                                    );
+                                    warn!("{}", err);
+                                    *error_text = Some(ImString::new(err));
                                 },
                             }
                         }
