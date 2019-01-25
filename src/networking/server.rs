@@ -317,8 +317,7 @@ impl Server {
                         let (addr, _) = self.send_queue.pop_front().unwrap();
                         // Disconnect any client that errors.
                         self.remove_client(&addr)?;
-                    }
-                    else {
+                    } else {
                         break;
                     }
                 },

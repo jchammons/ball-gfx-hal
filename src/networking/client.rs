@@ -314,6 +314,7 @@ impl Client {
                 return true;
             }
         }
+        self.needs_shutdown = true;
         false
     }
 
