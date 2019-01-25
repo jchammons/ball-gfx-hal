@@ -1,5 +1,7 @@
+use bincode;
 use failure::{Backtrace, Fail};
 use std::io;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 pub mod client;
@@ -59,66 +61,57 @@ impl RttEstimator {
     }
 }
 
+/// Non-fatal errors that occur on receiving a packet.
+///
+/// These should be logged, but generally do not end the connection.
+#[derive(Fail, Debug)]
+pub enum RecvError {
+    #[fail(display = "received packet that was too large ({} bytes)", _0)]
+    PacketTooLarge(usize),
+    #[fail(display = "reading packet header failed: {} {}", _0, _1)]
+    HeaderRead(io::Error, Backtrace),
+    #[fail(display = "deserializing packet payload failed: {} {}", _0, _1)]
+    Deserialize(bincode::Error, Backtrace),
+}
+
+/// (Mostly) fatal errors that should kill either the networking event
+/// loop, or the particular connection in question.
 #[derive(Fail, Debug)]
 pub enum Error {
     #[fail(display = "connection timed out")]
     TimedOut,
-    #[fail(
-        display = "got a packet of size {}, which is bigger than \
-                   MAX_PACKET_SIZE",
-        _0
-    )]
-    PacketTooLarge(usize),
-    #[fail(display = "reading header failed: {} {}", _0, _1)]
-    HeaderRead(#[cause] io::Error, Backtrace),
-    #[fail(display = "writing header failed: {} {}", _0, _1)]
-    HeaderWrite(#[cause] io::Error, Backtrace),
-    #[fail(display = "deserializing packet failed: {} {}", _0, _1)]
-    Deserialize(#[cause] bincode::Error, Backtrace),
-    #[fail(display = "serializing packet failed: {} {}", _0, _1)]
-    Serialize(#[cause] bincode::Error, Backtrace),
-    #[fail(display = "binding server socket failed: {} {}", _0, _1)]
-    BindSocket(#[cause] io::Error, Backtrace),
-    #[fail(display = "connecting to server socket failed: {} {}", _0, _1)]
-    ConnectSocket(#[cause] io::Error, Backtrace),
-    #[fail(display = "registering poll event failed: {} {}", _0, _1)]
-    PollRegister(#[cause] io::Error, Backtrace),
-    #[fail(display = "initializing poll failed: {} {}", _0, _1)]
-    PollInit(#[cause] io::Error, Backtrace),
-    #[fail(display = "connection is shutting down")]
-    ShuttingDown,
+    #[fail(display = "poll error: {} {}", _0, _1)]
+    Poll(#[cause] io::Error, Backtrace),
+    #[fail(display = "binding socket to {:?} failed: {}", addr, err)]
+    BindSocket {
+        addr: SocketAddr,
+        #[cause]
+        err: io::Error,
+    },
+    #[fail(display = "connecting socket to {:?} failed: {}", addr, err)]
+    ConnectSocket {
+        addr: SocketAddr,
+        #[cause]
+        err: io::Error,
+    },
+    #[fail(display = "socket write failed: {}", _0)]
+    SocketWrite(io::Error),
+    #[fail(display = "socket read failed: {}", _0)]
+    SocketRead(io::Error),
 }
 
 impl Error {
-    pub fn header_read(err: io::Error) -> Error {
-        Error::HeaderRead(err, Backtrace::new())
+    pub fn poll(err: io::Error) -> Error {
+        Error::Poll(err, Backtrace::new())
+    }
+}
+
+impl RecvError {
+    pub fn header_read(err: io::Error) -> RecvError {
+        RecvError::HeaderRead(err, Backtrace::new())
     }
 
-    pub fn header_write(err: io::Error) -> Error {
-        Error::HeaderWrite(err, Backtrace::new())
-    }
-
-    pub fn deserialize(err: bincode::Error) -> Error {
-        Error::Deserialize(err, Backtrace::new())
-    }
-
-    pub fn serialize(err: bincode::Error) -> Error {
-        Error::Serialize(err, Backtrace::new())
-    }
-
-    pub fn bind_socket(err: io::Error) -> Error {
-        Error::BindSocket(err, Backtrace::new())
-    }
-
-    pub fn connect_socket(err: io::Error) -> Error {
-        Error::ConnectSocket(err, Backtrace::new())
-    }
-
-    pub fn poll_register(err: io::Error) -> Error {
-        Error::PollRegister(err, Backtrace::new())
-    }
-
-    pub fn poll_init(err: io::Error) -> Error {
-        Error::PollInit(err, Backtrace::new())
+    pub fn deserialize(err: bincode::Error) -> RecvError {
+        RecvError::Deserialize(err, Backtrace::new())
     }
 }

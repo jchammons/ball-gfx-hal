@@ -9,6 +9,7 @@ use crate::networking::server::ServerPacket;
 use crate::networking::tick::Interval;
 use crate::networking::{
     Error,
+    RecvError,
     RttEstimator,
     CONNECTION_TIMEOUT,
     MAX_PACKET_SIZE,
@@ -24,8 +25,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,10 +56,11 @@ pub enum ClientPacket {
 
 pub enum ClientState {
     Connecting {
-        done: Sender<Result<Game, Error>>,
+        done: Sender<Result<(Game, ConnectedHandle), Option<Error>>>,
         cursor: Point2<f32>,
     },
     Connected {
+        done: Sender<Option<Error>>,
         tick: Interval,
         rtt: RttEstimator,
         ping: Interval,
@@ -78,7 +78,6 @@ pub struct Client {
     connection: Connection,
     state: ClientState,
     _shutdown: Registration,
-    disconnected: Arc<AtomicBool>,
     /// Marks after `shutdown` has been received, to shutdown when the
     /// `send_queue` is empty.
     needs_shutdown: bool,
@@ -86,14 +85,14 @@ pub struct Client {
     stats: NetworkStats,
 }
 
+pub type ConnectingHandle =
+    Receiver<Result<(Game, ConnectedHandle), Option<Error>>>;
+
+pub type ConnectedHandle = Receiver<Option<Error>>;
+
 /// Client handle used while connecting to a sever.
 pub struct ClientHandle {
     shutdown: SetReadiness,
-    disconnected: Arc<AtomicBool>,
-}
-
-pub struct ConnectingHandle {
-    done: Receiver<Result<Game, Error>>,
 }
 
 pub fn connect(
@@ -103,26 +102,17 @@ pub fn connect(
 ) -> Result<(ClientHandle, ConnectingHandle), Error> {
     let (done_tx, done_rx) = channel::bounded(1);
     let (shutdown_registration, shutdown_set_readiness) = Registration::new2();
-    let disconnected = Arc::new(AtomicBool::new(false));
-    let mut client = Client::new(
-        addr,
-        done_tx,
-        stats,
-        shutdown_registration,
-        disconnected.clone(),
-        cursor,
-    )?;
+    let client =
+        Client::new(addr, done_tx, stats, shutdown_registration, cursor)?;
     thread::spawn(move || {
-        run_event_loop(&mut client);
+        run_event_loop(client);
+        info!("client done");
     });
     Ok((
         ClientHandle {
             shutdown: shutdown_set_readiness,
-            disconnected,
         },
-        ConnectingHandle {
-            done: done_rx,
-        },
+        done_rx,
     ))
 }
 
@@ -130,28 +120,13 @@ impl ClientHandle {
     /// Signals the client thread to shutdown.
     pub fn shutdown(&self) {
         if let Err(err) = self.shutdown.set_readiness(Ready::readable()) {
-            warn!("failed to signal shutdown to client: {}", err)
-        }
-    }
-
-    /// Checks if the client has disconnected.
-    pub fn disconnected(&self) -> bool {
-        self.disconnected.load(Ordering::SeqCst)
-    }
-}
-
-impl ConnectingHandle {
-    /// Gets the connection result, if connection finished.
-    pub fn done(&mut self) -> Option<Result<Game, Error>> {
-        match self.done.try_recv() {
-            Ok(done) => Some(done),
-            Err(_) => None,
+            error!("failed to signal shutdown to client: {}", err)
         }
     }
 }
 
-// Gracefully shutdown when the handle is lost.
 impl Drop for ClientHandle {
+    /// Gracefully shutdown when the handle is lost.
     fn drop(&mut self) {
         self.shutdown();
     }
@@ -166,10 +141,19 @@ impl EventHandler for Client {
         match event.token() {
             SOCKET => {
                 if event.readiness().is_readable() {
-                    self.socket_readable();
+                    // Don't process any new messages while shutting down.
+                    if self.needs_shutdown {
+                        return false;
+                    }
+
+                    if let Err(err) = self.socket_readable() {
+                        return self.start_shutdown(Some(err));
+                    }
                 }
                 if event.readiness().is_writable() {
-                    self.socket_writable();
+                    if let Err(err) = self.socket_writable() {
+                        return self.start_shutdown(Some(err));
+                    }
                 }
 
                 if self.send_queue.is_empty() && self.needs_shutdown {
@@ -179,16 +163,21 @@ impl EventHandler for Client {
                 }
             },
             TIMER => {
+                // Don't respond to timer events while shutting down.
+                if self.needs_shutdown {
+                    return false;
+                }
+
                 while let Some(timeout) = self.timer.poll() {
                     match timeout {
                         TimeoutState::Ping => {
                             if let Err(err) = self.send_ping() {
-                                error!("error sending ping packet: {}", err);
+                                return self.start_shutdown(Some(err));
                             }
                         },
                         TimeoutState::Tick => {
                             if let Err(err) = self.send_tick() {
-                                error!("error sending tick packet: {}", err);
+                                return self.start_shutdown(Some(err));
                             }
                         },
                         TimeoutState::UpdateStats => {
@@ -209,28 +198,14 @@ impl EventHandler for Client {
                             );
                         },
                         TimeoutState::LostConnection => {
-                            self.disconnected.store(true, Ordering::Relaxed);
-                            info!("client connection timed out");
-                            if let ClientState::Connecting {
-                                ref mut done,
-                                ..
-                            } = self.state
-                            {
-                                let _ = done.send(Err(Error::TimedOut));
-                            }
-                            return true;
+                            return self.start_shutdown(Some(Error::TimedOut));
                         },
                     }
                 }
             },
             SHUTDOWN => {
                 info!("client started shutdown");
-                if let Err(err) = self.send(&ClientPacket::Disconnect) {
-                    error!("failed to send disconnect packet: {}", err);
-                    // If this errored, just shut down immediately.
-                    return true;
-                }
-                self.needs_shutdown = true;
+                return self.start_shutdown(None);
             },
             Token(_) => unreachable!(),
         }
@@ -242,25 +217,34 @@ impl EventHandler for Client {
 impl Client {
     pub fn new(
         addr: SocketAddr,
-        done: Sender<Result<Game, Error>>,
+        done: Sender<Result<(Game, ConnectedHandle), Option<Error>>>,
         stats: Sender<NetworkStats>,
         shutdown: Registration,
-        disconnected: Arc<AtomicBool>,
         cursor: Point2<f32>,
     ) -> Result<Client, Error> {
-        let socket = UdpSocket::bind(&"0.0.0.0:0".parse().unwrap())
-            .map_err(Error::bind_socket)?;
-        socket.connect(addr).map_err(Error::connect_socket)?;
+        let socket =
+            UdpSocket::bind(&"0.0.0.0:0".parse().unwrap()).map_err(|err| {
+                Error::BindSocket {
+                    addr,
+                    err,
+                }
+            })?;
+        socket.connect(addr).map_err(|err| {
+            Error::ConnectSocket {
+                addr,
+                err,
+            }
+        })?;
         let mut timer = timer::Builder::default()
             .tick_duration(Duration::from_millis(10))
             .build();
-        let poll = Poll::new().map_err(Error::poll_init)?;
+        let poll = Poll::new().map_err(Error::poll)?;
         poll.register(&socket, SOCKET, Ready::readable(), PollOpt::edge())
-            .map_err(Error::poll_register)?;
+            .map_err(Error::poll)?;
         poll.register(&timer, TIMER, Ready::readable(), PollOpt::edge())
-            .map_err(Error::poll_register)?;
+            .map_err(Error::poll)?;
         poll.register(&shutdown, SHUTDOWN, Ready::readable(), PollOpt::edge())
-            .map_err(Error::poll_register)?;
+            .map_err(Error::poll)?;
 
         let timeout =
             timer.set_timeout(CONNECTION_TIMEOUT, TimeoutState::LostConnection);
@@ -278,7 +262,6 @@ impl Client {
                 done,
                 cursor,
             },
-            disconnected,
             _shutdown: shutdown,
             stats_tx: stats,
             stats: NetworkStats::default(),
@@ -293,7 +276,60 @@ impl Client {
         Ok(client)
     }
 
-    pub fn socket_readable(&mut self) {
+    /// Starts shutting down the networking thread, with a provided reason.
+    ///
+    /// If any errors occur at this point, returns `true` to indicate
+    /// that the event loop should hard-shutdown immediately.
+    #[must_use]
+    fn start_shutdown(&mut self, reason: Option<Error>) -> bool {
+        // If already shutting down, don't redo this stuff.
+        if self.needs_shutdown {
+            return true;
+        }
+
+        match self.state {
+            ClientState::Connecting {
+                ref mut done,
+                ..
+            } => {
+                let _ = done.send(Err(reason));
+            },
+            ClientState::Connected {
+                ref mut done,
+                ..
+            } => {
+                let _ = done.send(reason);
+            },
+        }
+        // Get rid of any pending packets.
+        self.send_queue.clear();
+        // Send off a bunch of disconnected packets to the server, in
+        // the hopes that at least one gets through.
+        for _ in 0..8 {
+            if let Err(err) = self.send(&ClientPacket::Disconnect) {
+                error!(
+                    "error ocurred while sending disconnect packets: {}",
+                    err
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    fn reregister_socket(&mut self, writable: bool) -> Result<(), Error> {
+        let readiness = if writable {
+            Ready::readable() | Ready::writable()
+        } else {
+            Ready::readable()
+        };
+
+        self.poll
+            .reregister(&self.socket, SOCKET, readiness, PollOpt::edge())
+            .map_err(Error::poll)
+    }
+
+    fn socket_readable(&mut self) -> Result<(), Error> {
         loop {
             match self.socket.recv(&mut self.recv_buffer) {
                 Ok(bytes_read) => {
@@ -305,22 +341,29 @@ impl Client {
                     );
                     // Handle packet.
                     self.stats.bytes_in += bytes_read as u32;
-                    if let Err(err) = self.on_recv(bytes_read) {
-                        error!("{}", err);
+                    if let Err(err) = self.on_recv(bytes_read)? {
+                        error!(
+                            "receiving packet failed ({:?}): {}",
+                            &self.recv_buffer[0..bytes_read],
+                            err
+                        );
                     }
                 },
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
                         error!("error receiving packet on client: {}", err);
+                        return Err(Error::SocketRead(err));
                     } else {
                         break;
                     }
                 },
             }
         }
+
+        Ok(())
     }
 
-    pub fn socket_writable(&mut self) {
+    fn socket_writable(&mut self) -> Result<(), Error> {
         while let Some(packet) = self.send_queue.pop_front() {
             match self.socket.send(&packet) {
                 Err(err) => {
@@ -329,6 +372,7 @@ impl Client {
                             "error sending packet from client ({:?}): {}",
                             &packet, err
                         );
+                        return Err(Error::SocketWrite(err));
                     } else {
                         break;
                     }
@@ -353,19 +397,9 @@ impl Client {
         if self.send_queue.is_empty() {
             // No longer care about writable events if there are no
             // more packets to send.
-            if let Err(err) = self
-                .poll
-                .reregister(
-                    &self.socket,
-                    SOCKET,
-                    Ready::readable(),
-                    PollOpt::edge(),
-                )
-                .map_err(Error::poll_register)
-            {
-                error!("{}", err);
-            }
+            self.reregister_socket(false)?;
         }
+        Ok(())
     }
 
     fn send_ping(&mut self) -> Result<(), Error> {
@@ -408,14 +442,20 @@ impl Client {
         Ok(())
     }
 
-    fn on_recv(&mut self, bytes_read: usize) -> Result<(), Error> {
+    fn on_recv(
+        &mut self,
+        bytes_read: usize,
+    ) -> Result<Result<(), RecvError>, Error> {
         // Make sure that it fits in recv_buffer
         if bytes_read > MAX_PACKET_SIZE {
-            return Err(Error::PacketTooLarge(bytes_read));
+            return Ok(Err(RecvError::PacketTooLarge(bytes_read)));
         }
         let packet = &self.recv_buffer[0..bytes_read];
         let (packet, sequence, _, lost) =
-            self.connection.decode(Cursor::new(packet))?;
+            match self.connection.decode(Cursor::new(packet)) {
+                Ok(result) => result,
+                Err(err) => return Ok(Err(err)),
+            };
         self.stats.packets_lost += lost.len() as u16;
 
         let transition = match self.state {
@@ -440,11 +480,13 @@ impl Client {
                             .set_timeout(ping.interval(), TimeoutState::Ping);
 
                         // Signal the main thread that connection finished.
-                        done.send(Ok(game)).unwrap();
+                        let (done_tx, done_rx) = channel::bounded(1);
+                        let _ = done.send(Ok((game, done_rx)));
 
                         info!("completed connection to server");
                         // Transition to connected state.
                         Some(ClientState::Connected {
+                            done: done_tx,
                             game: game_handle,
                             tick,
                             ping,
@@ -484,30 +526,22 @@ impl Client {
             self.state = transition;
         }
 
-        Ok(())
+        Ok(Ok(()))
     }
 
     fn send(&mut self, contents: &ClientPacket) -> Result<u32, Error> {
         // Don't send any additional packets while shutting down.
         if self.needs_shutdown {
-            return Err(Error::ShuttingDown);
+            panic!("attempted to send packet while already shutting down");
         }
 
-        let size = bincode::serialized_size(contents)
-            .map_err(Error::serialize)? as usize;
+        // Serialization errors are always fatal.
+        let size = bincode::serialized_size(contents).unwrap() as usize;
         let mut packet = Vec::with_capacity(size + HEADER_BYTES);
-        let sequence = self.connection.send_header(&mut packet)?;
-        bincode::serialize_into(&mut packet, contents)
-            .map_err(Error::serialize)?;
+        let sequence = self.connection.send_header(&mut packet);
+        bincode::serialize_into(&mut packet, contents).unwrap();
         self.send_queue.push_back(packet);
-        self.poll
-            .reregister(
-                &self.socket,
-                SOCKET,
-                Ready::readable() | Ready::writable(),
-                PollOpt::edge(),
-            )
-            .map_err(Error::poll_register)?;
+        self.reregister_socket(true)?;
 
         Ok(sequence)
     }
