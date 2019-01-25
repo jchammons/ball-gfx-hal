@@ -1,4 +1,4 @@
-use crate::networking::Error;
+use crate::networking::RecvError;
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
@@ -29,13 +29,12 @@ impl Acks {
         if sequence > self.ack {
             // Packet newer than most recent packet, so shift
             // everything.
-            self.ack_bits <<= sequence - self.ack;
+            self.ack_bits = self.ack_bits.wrapping_shl(sequence - self.ack);
             self.ack_bits |= 1;
             self.ack = sequence;
-        } else if self.ack - sequence <= 32 {
-            // Received a packet newer than this one before, but it's
-            // still in the 32-packet window, so store it.
-            self.ack_bits |= 1 << (self.ack - sequence);
+        } else {
+            // Received a packet newer than this one before.
+            self.ack_bits |= 1u32.wrapping_shl(self.ack - sequence);
         }
     }
 
@@ -46,7 +45,7 @@ impl Acks {
         if new.ack > self.ack {
             // Anything that is outside the range of the new ack can
             // be considered lost.
-            let mask = !(!0 >> (new.ack - self.ack));
+            let mask = !((!0u32).wrapping_shr(new.ack - self.ack));
             lost.extend(
                 Acks {
                     ack_bits: !self.ack_bits & mask,
@@ -56,12 +55,12 @@ impl Acks {
             );
 
             // Shift everything.
-            self.ack_bits <<= new.ack - self.ack;
+            self.ack_bits = self.ack_bits.wrapping_shl(new.ack - self.ack);
             self.ack_bits |= new.ack;
             self.ack = new.ack;
-        } else if self.ack - new.ack <= 32 {
-            self.ack_bits |= new.ack << (self.ack - new.ack);
-        };
+        } else {
+            self.ack_bits |= new.ack.wrapping_shl(self.ack - new.ack);
+        }
         lost
     }
 
@@ -71,7 +70,7 @@ impl Acks {
         if self.ack < sequence {
             return false;
         }
-        self.ack_bits & (1 << (self.ack - sequence)) != 0
+        self.ack_bits & (1u32.wrapping_shl(self.ack - sequence)) != 0
     }
 
     /// Returns an iterator over the acked packets.
@@ -93,10 +92,12 @@ impl Connection {
     pub fn recv_header<B: Read>(
         &mut self,
         mut packet: B,
-    ) -> Result<(u32, Acks, SmallVec<[u32; 4]>), Error> {
-        let sequence = packet.read_u32::<BE>().map_err(Error::header_read)?;
-        let ack = packet.read_u32::<BE>().map_err(Error::header_read)?;
-        let ack_bits = packet.read_u32::<BE>().map_err(Error::header_read)?;
+    ) -> Result<(u32, Acks, SmallVec<[u32; 4]>), RecvError> {
+        let sequence =
+            packet.read_u32::<BE>().map_err(RecvError::header_read)?;
+        let ack = packet.read_u32::<BE>().map_err(RecvError::header_read)?;
+        let ack_bits =
+            packet.read_u32::<BE>().map_err(RecvError::header_read)?;
 
         self.acks.ack(sequence);
         let acks = Acks {
@@ -107,18 +108,17 @@ impl Connection {
         Ok((sequence, acks, lost))
     }
 
-    pub fn send_header<B: Write>(
-        &mut self,
-        mut packet: B,
-    ) -> Result<u32, Error> {
+    /// Writes the header for the next packet into a buffer.
+    ///
+    /// Panics if the buffer is not large enough or if an IO error
+    /// occurs while writing.
+    pub fn send_header<B: Write>(&mut self, mut packet: B) -> u32 {
         let sequence = self.local_sequence;
         self.local_sequence += 1;
-        packet.write_u32::<BE>(sequence).map_err(Error::header_write)?;
-        packet.write_u32::<BE>(self.acks.ack).map_err(Error::header_write)?;
-        packet
-            .write_u32::<BE>(self.acks.ack_bits)
-            .map_err(Error::header_write)?;
-        Ok(sequence)
+        packet.write_u32::<BE>(sequence).unwrap();
+        packet.write_u32::<BE>(self.acks.ack).unwrap();
+        packet.write_u32::<BE>(self.acks.ack_bits).unwrap();
+        sequence
     }
 
     /// Reads the header of a packet, and then deserializes the
@@ -127,10 +127,10 @@ impl Connection {
     pub fn decode<B: Read, P: DeserializeOwned>(
         &mut self,
         mut read: B,
-    ) -> Result<(P, u32, Acks, SmallVec<[u32; 4]>), Error> {
+    ) -> Result<(P, u32, Acks, SmallVec<[u32; 4]>), RecvError> {
         let (sequence, acks, lost) = self.recv_header(&mut read)?;
         let packet =
-            bincode::deserialize_from(read).map_err(Error::deserialize)?;
+            bincode::deserialize_from(read).map_err(RecvError::deserialize)?;
         Ok((packet, sequence, acks, lost))
     }
 }

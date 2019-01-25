@@ -9,7 +9,7 @@ pub trait EventHandler {
     fn handle(&mut self, event: Event) -> bool;
 }
 
-pub fn run_event_loop<T: EventHandler>(handler: &mut T) {
+pub fn run_event_loop<T: EventHandler>(mut handler: T) {
     let mut events = Events::with_capacity(1024);
     'event_loop: loop {
         if let Err(err) = handler.poll().poll(&mut events, None) {
