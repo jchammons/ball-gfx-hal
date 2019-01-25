@@ -314,10 +314,13 @@ impl Server {
                 Err(err) => {
                     if err.kind() != io::ErrorKind::WouldBlock {
                         error!("error sending packet to {} ({})", addr, err);
-                        // TODO possibly disconnect these clients
-                        self.send_queue.pop_front();
+                        let (addr, _) = self.send_queue.pop_front().unwrap();
+                        // Disconnect any client that errors.
+                        self.remove_client(&addr)?;
                     }
-                    break;
+                    else {
+                        break;
+                    }
                 },
                 // Pretty sure this never happens?
                 Ok(bytes_written) => {
