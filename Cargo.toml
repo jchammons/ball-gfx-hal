@@ -10,7 +10,7 @@ default = ["renderdoc"]
 [dependencies]
 gfx-hal = "0.1.0"
 gfx-backend-vulkan = "0.1.0"
-imgui-gfx-hal = "0.1.0"
+imgui-gfx-hal = "0.1.1"
 imgui = "0.0.21"
 winit = "0.18.0"
 imgui-winit = "0.1.2"
@@ -38,6 +38,7 @@ either = "1.5.0"
 crossbeam = "0.6.0"
 enum-kinds = "0.4.1"
 take_mut = "0.2.2"
+itertools = "0.8.0"
 
 [build-dependencies]
 shaderc = "0.3.12"
