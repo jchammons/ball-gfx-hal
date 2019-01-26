@@ -210,7 +210,7 @@ impl<B: Backend> CircleRenderer<B> {
             cmd_buffer.finish();
 
             graphics.device.reset_fence(&graphics.transfer_fence).unwrap();
-            graphics.queue_groups.transfer_queue().submit_nosemaphores(
+            graphics.queue_group.queues[0].submit_nosemaphores(
                 Some(&cmd_buffer),
                 Some(&graphics.transfer_fence),
             );

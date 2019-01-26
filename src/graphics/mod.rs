@@ -1,5 +1,6 @@
 use arrayvec::ArrayVec;
 use gfx_hal::{
+    adapter::DeviceType,
     buffer,
     command::{
         ClearColor,
@@ -9,6 +10,7 @@ use gfx_hal::{
         Primary,
         RenderPassInlineEncoder,
     },
+    error::DeviceCreationError,
     format::{Aspects, ChannelType, Format, Swizzle},
     image::{self, Layout, SubresourceRange, ViewKind},
     memory::{Barrier, Dependencies, Properties, Requirements},
@@ -28,7 +30,6 @@ use gfx_hal::{
     Backbuffer,
     Backend,
     CommandPool,
-    CommandQueue,
     Device,
     FrameSync,
     Instance,
@@ -38,7 +39,6 @@ use gfx_hal::{
     PresentMode,
     QueueFamily,
     QueueGroup,
-    QueueType,
     Submission,
     Surface,
     SwapImageIndex,
@@ -47,7 +47,9 @@ use gfx_hal::{
 };
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
+use itertools::Itertools;
 use log::{error, info};
+use std::cmp::Ordering;
 use std::mem;
 use take_mut;
 
@@ -72,28 +74,13 @@ struct SwapchainState<B: Backend> {
     frame_views: Vec<B::ImageView>,
 }
 
-/// This exists because nvidia GPUs have a separate queue family that
-/// only supports transfer, but is faster than the generic graphics
-/// queue family at transfering. Other GPUs don't appear have this, so
-/// both need to be supported.
-pub enum QueueGroups<B: Backend> {
-    // TODO: there needs to be more stuff to handle gpus with separate
-    // graphics and present queues. I'm not sure how often that
-    // happens though
-    Single(QueueGroup<B, gfx_hal::Graphics>),
-    Separate {
-        graphics: QueueGroup<B, gfx_hal::Graphics>,
-        transfer: QueueGroup<B, gfx_hal::Transfer>,
-    },
-}
-
 pub struct Graphics<B: Backend> {
     surface: B::Surface,
     adapter: Adapter<B>,
     device: B::Device,
     memory_types: Vec<MemoryType>,
-    queue_groups: QueueGroups<B>,
-    transfer_command_pool: CommandPool<B, gfx_hal::Transfer>,
+    queue_group: QueueGroup<B, gfx_hal::Graphics>,
+    transfer_command_pool: CommandPool<B, gfx_hal::Graphics>,
     frame_command_pools:
         ArrayVec<[CommandPool<B, gfx_hal::Graphics>; MAX_FRAMES]>,
     frame_cmd_buffers: ArrayVec<
@@ -166,7 +153,7 @@ pub mod renderdoc {
         ()
     }
 
-    pub fn trigger_capture(_: &mut RenderDoc) {}
+    pub fn trigger_capture(_: &mut RenderDoc, n_frames: u32) {}
 }
 
 /// Picks a memory type staisfying `requirements` with `properties`,
@@ -209,85 +196,6 @@ pub unsafe fn create_buffer<B: Backend>(
     (buffer, memory, requirements.size)
 }
 
-impl<B: Backend> QueueGroups<B> {
-    /// Gets the main graphics command queue.
-    ///
-    /// This is always the first queue for the graphics queue group.
-    pub fn graphics_queue(
-        &mut self,
-    ) -> &mut CommandQueue<B, gfx_hal::Graphics> {
-        match self {
-            QueueGroups::Single(graphics) => &mut graphics.queues[0],
-            QueueGroups::Separate {
-                graphics,
-                ..
-            } => &mut graphics.queues[0],
-        }
-    }
-
-    /// Gets the main transfer command queue.
-    ///
-    /// If there is not a separate transfer queue, this is the second
-    /// graphics queue. If there is only one graphics queue, it just
-    /// returns the same queue as a call to `graphics_queue`
-    pub fn transfer_queue(
-        &mut self,
-    ) -> &mut CommandQueue<B, gfx_hal::Transfer> {
-        match self {
-            QueueGroups::Single(graphics) => unsafe {
-                if graphics.queues.len() > 1 {
-                    graphics.queues[1].downgrade()
-                } else {
-                    graphics.queues[0].downgrade()
-                }
-            },
-            QueueGroups::Separate {
-                transfer,
-                ..
-            } => &mut transfer.queues[0],
-        }
-    }
-
-    /// Creates a command pool with graphics capability.
-    pub fn create_graphics_command_pool(
-        &self,
-        device: &B::Device,
-        flags: CommandPoolCreateFlags,
-    ) -> CommandPool<B, gfx_hal::Graphics> {
-        let queue_group = match self {
-            QueueGroups::Single(graphics) => graphics,
-            QueueGroups::Separate {
-                graphics,
-                ..
-            } => graphics,
-        };
-        unsafe { device.create_command_pool_typed(queue_group, flags).unwrap() }
-    }
-
-    /// Creates a command pool with transfer capability.
-    pub fn create_transfer_command_pool(
-        &self,
-        device: &B::Device,
-        flags: CommandPoolCreateFlags,
-    ) -> CommandPool<B, gfx_hal::Transfer> {
-        unsafe {
-            match self {
-                QueueGroups::Single(graphics) => {
-                    CommandPool::new(
-                        device
-                            .create_command_pool(graphics.family(), flags)
-                            .unwrap(),
-                    )
-                },
-                QueueGroups::Separate {
-                    transfer,
-                    ..
-                } => device.create_command_pool_typed(transfer, flags).unwrap(),
-            }
-        }
-    }
-}
-
 impl<B: Backend> Graphics<B> {
     pub fn new<I: Instance<Backend = B>>(
         instance: &I,
@@ -295,79 +203,55 @@ impl<B: Backend> Graphics<B> {
         imgui: &mut ImGui,
         present_mode: PresentMode,
     ) -> Graphics<B> {
-        let mut adapters = instance.enumerate_adapters().into_iter();
+        let mut adapters =
+            instance.enumerate_adapters().into_iter().sorted_by(|a, b| {
+                // Prefer discrete gpus to everything else, and everything else
+                // to software rendering.
+                match (&a.info.device_type, &b.info.device_type) {
+                    (DeviceType::DiscreteGpu, _) => Ordering::Less,
+                    (_, DeviceType::DiscreteGpu) => Ordering::Greater,
+                    (DeviceType::Cpu, _) => Ordering::Greater,
+                    (_, DeviceType::Cpu) => Ordering::Less,
+                    _ => Ordering::Equal,
+                }
+            });
 
         // Pick the first adapter with a graphics queue family.
-        let (adapter, device, mut queue_groups) = loop {
+        let (adapter, device, mut queue_group) = loop {
             let adapter = adapters.next().expect("No suitable adapter found");
-            // Try to get a separate graphics and transfer queue,
-            // since that's apparently faster.
-            let transfer = adapter
-                .queue_families
-                .iter()
-                .find(|family| family.queue_type() == QueueType::Transfer);
-            let graphics = adapter.queue_families.iter().find(|family| {
+            match adapter.open_with::<_, gfx_hal::Graphics>(1, |family| {
                 family.supports_graphics() &&
                     surface.supports_queue_family(family)
-            });
-            match (transfer, graphics) {
-                (_, None) => continue, // No graphics queue.
-                (None, Some(graphics)) => {
-                    // No transfer queue.
-                    let mut gpu = unsafe {
-                        adapter
-                            .physical_device
-                            .open(&[(&graphics, &[1.0])])
-                            .unwrap()
-                    };
-                    let queue_group = gpu
-                        .queues
-                        .take::<gfx_hal::Graphics>(graphics.id())
-                        .unwrap();
-                    break (
-                        adapter,
-                        gpu.device,
-                        QueueGroups::Single(queue_group),
-                    );
+            }) {
+                Ok((device, queue_group)) => {
+                    break (adapter, device, queue_group);
                 },
-                (Some(transfer), Some(graphics)) => {
-                    // Separate transfer and graphics
-                    // queues.
-                    let mut gpu = unsafe {
-                        adapter
-                            .physical_device
-                            .open(&[(&graphics, &[1.0]), (&transfer, &[0.0])])
-                            .unwrap()
-                    };
-                    let graphics = gpu
-                        .queues
-                        .take::<gfx_hal::Graphics>(graphics.id())
-                        .unwrap();
-                    let transfer = gpu
-                        .queues
-                        .take::<gfx_hal::Transfer>(transfer.id())
-                        .unwrap();
-                    break (
-                        adapter,
-                        gpu.device,
-                        QueueGroups::Separate {
-                            graphics,
-                            transfer,
-                        },
-                    );
+                // These errors mean we just give up on this adapter.
+                Err(DeviceCreationError::MissingExtension) |
+                Err(DeviceCreationError::MissingFeature) => (),
+                // These errors are more serious and should be reported.
+                Err(err) => {
+                    error!(
+                        "error opening device from adapter '{}': {}",
+                        adapter.info.name, err
+                    )
                 },
             }
         };
+        info!("selected adapter '{}'", adapter.info.name);
         let physical_device = &adapter.physical_device;
         let memory_types = physical_device.memory_properties().memory_types;
 
         let transfer_fence = device.create_fence(false).unwrap();
 
-        let mut transfer_command_pool = queue_groups
-            .create_transfer_command_pool(
-                &device,
-                CommandPoolCreateFlags::TRANSIENT,
-            );
+        let mut transfer_command_pool = unsafe {
+            device
+                .create_command_pool_typed(
+                    &queue_group,
+                    CommandPoolCreateFlags::TRANSIENT,
+                )
+                .unwrap()
+        };
 
         // Create global UBO
         let (global_ubo, global_ubo_memory) = unsafe {
@@ -451,7 +335,7 @@ impl<B: Backend> Graphics<B> {
             0,
             MAX_FRAMES,
             &mut transfer_command_pool,
-            &mut queue_groups.transfer_queue(),
+            &mut queue_group.queues[0],
         )
         .unwrap();
 
@@ -482,10 +366,14 @@ impl<B: Backend> Graphics<B> {
         // resetting the corresponding command buffers individually.
         let mut frame_command_pools: ArrayVec<[_; 2]> = (0..MAX_FRAMES)
             .map(|_| {
-                queue_groups.create_graphics_command_pool(
-                    &device,
-                    CommandPoolCreateFlags::empty(),
-                )
+                unsafe {
+                    device
+                        .create_command_pool_typed(
+                            &queue_group,
+                            CommandPoolCreateFlags::empty(),
+                        )
+                        .unwrap()
+                }
             })
             .collect();
         // Allocate a command buffer for each frame.
@@ -495,11 +383,14 @@ impl<B: Backend> Graphics<B> {
             })
             .collect();
 
-        let mut global_ubo_update_command_pool = queue_groups
-            .create_graphics_command_pool(
-                &device,
-                CommandPoolCreateFlags::empty(),
-            );
+        let mut global_ubo_update_command_pool = unsafe {
+            device
+                .create_command_pool_typed(
+                    &queue_group,
+                    CommandPoolCreateFlags::empty(),
+                )
+                .unwrap()
+        };
         let global_ubo_update_cmd_buffer =
             global_ubo_update_command_pool.acquire_command_buffer::<OneShot>();
         let global_ubo_update_fence = device.create_fence(true).unwrap();
@@ -519,7 +410,7 @@ impl<B: Backend> Graphics<B> {
             adapter,
             memory_types,
             device,
-            queue_groups,
+            queue_group,
             transfer_command_pool,
             transfer_fence,
             frame_command_pools,
@@ -569,6 +460,8 @@ impl<B: Backend> Graphics<B> {
         ui: Ui,
         draw_fn: F,
     ) -> Result<(), ()> {
+        let queue = &mut self.queue_group.queues[0];
+
         // Frame specific resources...
         let frame_fence = &self.frame_fences[self.current_frame];
         let image_available_semaphore =
@@ -618,7 +511,7 @@ impl<B: Backend> Graphics<B> {
                 // last update is still running. It's okay to block on
                 // this since it doesn't happen very often.
                 self.device
-                    .wait_for_fence(&self.global_ubo_update_fence, 10_000_000)
+                    .wait_for_fence(&self.global_ubo_update_fence, !0)
                     .unwrap();
                 self.device.reset_fence(&self.global_ubo_update_fence).unwrap();
                 // Reset the command buffer, so that it can be
@@ -647,8 +540,8 @@ impl<B: Backend> Graphics<B> {
                 // still in use in a previous frame.
                 let barrier = Barrier::whole_buffer(
                     &self.global_ubo,
-                    buffer::Access::TRANSFER_WRITE..
-                        buffer::Access::CONSTANT_BUFFER_READ,
+                    buffer::Access::CONSTANT_BUFFER_READ..
+                        buffer::Access::TRANSFER_WRITE,
                 );
                 // As of right now, the vertex shader reads the ubo,
                 // but the fragment shader does not. If that changes,
@@ -675,7 +568,7 @@ impl<B: Backend> Graphics<B> {
 
                 cmd_buffer.finish();
 
-                self.queue_groups.graphics_queue().submit_nosemaphores(
+                queue.submit_nosemaphores(
                     Some(&*cmd_buffer),
                     Some(&self.global_ubo_update_fence),
                 );
@@ -751,9 +644,7 @@ impl<B: Backend> Graphics<B> {
                 )),
                 signal_semaphores: Some(frame_finished_semaphore),
             };
-            self.queue_groups
-                .graphics_queue()
-                .submit(submission, Some(frame_fence));
+            queue.submit(submission, Some(frame_fence));
 
             self.current_frame = (self.current_frame + 1) % MAX_FRAMES;
             self.swapchain_update = false;
@@ -764,7 +655,7 @@ impl<B: Backend> Graphics<B> {
                 .swapchain_state
                 .swapchain
                 .present(
-                    &mut self.queue_groups.graphics_queue(),
+                    queue,
                     frame_index,
                     [frame_finished_semaphore].iter().cloned(),
                 )

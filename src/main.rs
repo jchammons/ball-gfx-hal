@@ -125,9 +125,12 @@ fn run_gui() {
         debug.ui(&ui, &mut graphics, &mut renderdoc, frame_time);
         game_state.ui(&ui, &debug);
 
-        let _ = graphics.draw_frame(ui, |mut ctx| {
+        let result = graphics.draw_frame(ui, |mut ctx| {
             game_state.draw(now, &mut circle_rend, &mut ctx, &debug);
         });
+        if let Err(_) = result {
+            graphics::renderdoc::trigger_capture(&mut renderdoc, 3);
+        }
     }
 
     // Graphics cleanup.
