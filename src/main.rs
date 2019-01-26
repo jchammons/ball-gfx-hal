@@ -5,6 +5,8 @@ use ctrlc;
 use gfx_hal::PresentMode;
 use imgui::ImGui;
 use imgui_winit::ImGuiWinit;
+use nalgebra::Point2;
+use rand::{thread_rng, Rng};
 use std::net::SocketAddr;
 use std::time::Instant;
 use structopt::StructOpt;
@@ -31,8 +33,20 @@ pub mod ui;
 struct Cli {
     /// Instead of opening a gui window, host a headless server on
     /// this address.
-    #[structopt(short = "s", long = "server")]
-    host_server: Option<SocketAddr>,
+    #[structopt(
+        short = "s",
+        long = "server",
+        raw(conflicts_with = "\"client\"")
+    )]
+    server: Option<SocketAddr>,
+    /// Instead of opening a gui window, connect a dummy client to a
+    /// server on this address.
+    #[structopt(
+        short = "c",
+        long = "client",
+        raw(conflicts_with = "\"server\"")
+    )]
+    client: Option<SocketAddr>,
 }
 
 fn main() {
@@ -40,8 +54,8 @@ fn main() {
 
     let cli = Cli::from_args();
 
-    match cli.host_server {
-        Some(addr) => {
+    match (cli.server, cli.client) {
+        (Some(addr), None) => {
             let (server, thread) = networking::server::host(addr).unwrap();
             ctrlc::set_handler(move || {
                 server.shutdown();
@@ -49,7 +63,30 @@ fn main() {
             .unwrap();
             thread.join().unwrap();
         },
-        None => run_gui(),
+        (None, Some(addr)) => {
+            // Generate random cursor position within the inner 50% of the
+            // circle.
+            let mut rng = thread_rng();
+            // Rejection sampling because I'm lazy...
+            let cursor = loop {
+                let cursor = Point2::new(
+                    rng.gen_range(-0.5, 0.5),
+                    rng.gen_range(-0.5, 0.5),
+                );
+                if cursor.coords.norm_squared() < 0.5 * 0.5 {
+                    break cursor;
+                }
+            };
+            let (client, _, thread) =
+                networking::client::connect(addr, None, cursor).unwrap();
+            ctrlc::set_handler(move || {
+                client.shutdown();
+            })
+            .unwrap();
+            thread.join().unwrap();
+        },
+        (None, None) => run_gui(),
+        _ => unreachable!(),
     }
 }
 

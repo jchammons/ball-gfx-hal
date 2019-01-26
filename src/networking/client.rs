@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const SOCKET: Token = Token(0);
@@ -68,6 +68,11 @@ pub enum ClientState {
     },
 }
 
+struct Stats {
+    send: Sender<NetworkStats>,
+    next: NetworkStats,
+}
+
 pub struct Client {
     socket: UdpSocket,
     timer: Timer<TimeoutState>,
@@ -81,8 +86,7 @@ pub struct Client {
     /// Marks after `shutdown` has been received, to shutdown when the
     /// `send_queue` is empty.
     needs_shutdown: bool,
-    stats_tx: Sender<NetworkStats>,
-    stats: NetworkStats,
+    stats: Option<Stats>,
 }
 
 pub type ConnectingHandle =
@@ -97,14 +101,14 @@ pub struct ClientHandle {
 
 pub fn connect(
     addr: SocketAddr,
-    stats: Sender<NetworkStats>,
+    stats: Option<Sender<NetworkStats>>,
     cursor: Point2<f32>,
-) -> Result<(ClientHandle, ConnectingHandle), Error> {
+) -> Result<(ClientHandle, ConnectingHandle, JoinHandle<()>), Error> {
     let (done_tx, done_rx) = channel::bounded(1);
     let (shutdown_registration, shutdown_set_readiness) = Registration::new2();
     let client =
         Client::new(addr, done_tx, stats, shutdown_registration, cursor)?;
-    thread::spawn(move || {
+    let thread = thread::spawn(move || {
         run_event_loop(client);
         info!("client done");
     });
@@ -113,6 +117,7 @@ pub fn connect(
             shutdown: shutdown_set_readiness,
         },
         done_rx,
+        thread,
     ))
 }
 
@@ -181,17 +186,22 @@ impl EventHandler for Client {
                             }
                         },
                         TimeoutState::UpdateStats => {
+                            // If this timeout is triggered with
+                            // stats=None, it is a bug and should
+                            // crash.
+                            let stats = self.stats.as_mut().unwrap();
+
                             if let ClientState::Connected {
                                 ref rtt,
                                 ..
                             } = self.state
                             {
                                 if let Some(rtt) = rtt.rtt() {
-                                    self.stats.rtt = rtt;
+                                    stats.next.rtt = rtt;
                                 }
                             }
-                            self.stats_tx.send(self.stats).unwrap();
-                            self.stats = NetworkStats::default();
+                            stats.send.send(stats.next).unwrap();
+                            stats.next = NetworkStats::default();
                             self.timer.set_timeout(
                                 NETWORK_STATS_RATE,
                                 TimeoutState::UpdateStats,
@@ -218,7 +228,7 @@ impl Client {
     pub fn new(
         addr: SocketAddr,
         done: Sender<Result<(Game, ConnectedHandle), Option<Error>>>,
-        stats: Sender<NetworkStats>,
+        stats: Option<Sender<NetworkStats>>,
         shutdown: Registration,
         cursor: Point2<f32>,
     ) -> Result<Client, Error> {
@@ -248,7 +258,9 @@ impl Client {
 
         let timeout =
             timer.set_timeout(CONNECTION_TIMEOUT, TimeoutState::LostConnection);
-        timer.set_timeout(NETWORK_STATS_RATE, TimeoutState::UpdateStats);
+        if stats.is_some() {
+            timer.set_timeout(NETWORK_STATS_RATE, TimeoutState::UpdateStats);
+        }
 
         let mut client = Client {
             socket,
@@ -263,8 +275,12 @@ impl Client {
                 cursor,
             },
             _shutdown: shutdown,
-            stats_tx: stats,
-            stats: NetworkStats::default(),
+            stats: stats.map(|send| {
+                Stats {
+                    send,
+                    next: NetworkStats::default(),
+                }
+            }),
             needs_shutdown: false,
         };
 
@@ -341,7 +357,9 @@ impl Client {
                         TimeoutState::LostConnection,
                     );
                     // Handle packet.
-                    self.stats.bytes_in += bytes_read as u32;
+                    if let Some(ref mut stats) = self.stats {
+                        stats.next.bytes_in += bytes_read as u32;
+                    }
                     if let Err(err) = self.on_recv(bytes_read)? {
                         error!(
                             "receiving packet failed ({:?}): {}",
@@ -379,8 +397,10 @@ impl Client {
                     }
                 },
                 Ok(bytes_written) => {
-                    self.stats.packets_sent += 1;
-                    self.stats.bytes_out += bytes_written as u32;
+                    if let Some(ref mut stats) = self.stats {
+                        stats.next.packets_sent += 1;
+                        stats.next.bytes_out += bytes_written as u32;
+                    }
                     // Pretty sure this never happens?
                     if bytes_written < packet.len() {
                         error!(
@@ -457,7 +477,9 @@ impl Client {
                 Ok(result) => result,
                 Err(err) => return Ok(Err(err)),
             };
-        self.stats.packets_lost += lost.len() as u16;
+        if let Some(ref mut stats) = self.stats {
+            stats.next.packets_lost += lost.len() as u16;
+        }
 
         let transition = match self.state {
             ClientState::Connecting {
