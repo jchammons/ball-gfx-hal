@@ -12,7 +12,7 @@ use log::{error, warn};
 use nalgebra::Point2;
 use palette::LinSrgb;
 use std::iter;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Instant;
 use winit::{dpi::LogicalSize, ElementState, MouseButton, WindowEvent};
 
@@ -313,19 +313,36 @@ impl GameState {
                         ui.input_text(im_str!("Remote address"), server_addr)
                             .build();
                         if ui.small_button(im_str!("Connect to server")) {
-                            match server_addr.to_str().parse() {
-                                Ok(addr) => {
-                                    match Connecting::connect(
-                                        addr, debug, cursor,
-                                    ) {
-                                        Ok(state) => *connecting = Some(state),
-                                        Err(err) => {
+                            match server_addr.to_str().to_socket_addrs() {
+                                Ok(mut addrs) => {
+                                    match addrs.next() {
+                                        Some(addr) => {
+                                            match Connecting::connect(
+                                                addr, debug, cursor,
+                                            ) {
+                                                Ok(state) => {
+                                                    *connecting = Some(state)
+                                                },
+                                                Err(err) => {
+                                                    let err = format!(
+                                                        "error connecting to \
+                                                         server: {}",
+                                                        err
+                                                    );
+                                                    error!("{}", err);
+                                                    *error_text = Some(
+                                                        ImString::new(err),
+                                                    );
+                                                },
+                                            }
+                                        },
+                                        None => {
                                             let err = format!(
-                                                "error connecting to server: \
-                                                 {}",
-                                                err
+                                                "couldn't resolve server \
+                                                 address: {}",
+                                                server_addr.to_str()
                                             );
-                                            error!("{}", err);
+                                            warn!("{}", err);
                                             *error_text =
                                                 Some(ImString::new(err));
                                         },
@@ -350,17 +367,36 @@ impl GameState {
                         )
                         .build();
                         if ui.small_button(im_str!("Host server")) {
-                            match server_addr_host.to_str().parse() {
-                                Ok(addr) => {
-                                    match Connecting::host(addr, debug, cursor)
-                                    {
-                                        Ok(state) => *connecting = Some(state),
-                                        Err(err) => {
+                            match server_addr_host.to_str().to_socket_addrs() {
+                                Ok(mut addrs) => {
+                                    match addrs.next() {
+                                        Some(addr) => {
+                                            match Connecting::host(
+                                                addr, debug, cursor,
+                                            ) {
+                                                Ok(state) => {
+                                                    *connecting = Some(state)
+                                                },
+                                                Err(err) => {
+                                                    let err = format!(
+                                                        "error hosting \
+                                                         server: {}",
+                                                        err
+                                                    );
+                                                    error!("{}", err);
+                                                    *error_text = Some(
+                                                        ImString::new(err),
+                                                    );
+                                                },
+                                            }
+                                        },
+                                        None => {
                                             let err = format!(
-                                                "error hosting server: {}",
-                                                err
+                                                "Couldn't resolve server \
+                                                 hosting address: {}",
+                                                server_addr_host.to_str()
                                             );
-                                            error!("{}", err);
+                                            warn!("{}", err);
                                             *error_text =
                                                 Some(ImString::new(err));
                                         },
