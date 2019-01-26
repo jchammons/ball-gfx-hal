@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 /// Number of hue candidates to generate for each existing player
 /// sample.
-const HUE_CANDIDATES_PER_SAMPLE: usize = 8;
+const HUE_CANDIDATES_PER_SAMPLE: usize = 4;
 
 /// Gets the distance between two hue values, specified from 0 to 1.
 fn hue_distance(a: f32, b: f32) -> f32 {
@@ -32,6 +32,18 @@ fn hue_distance(a: f32, b: f32) -> f32 {
     } else {
         dist
     }
+}
+
+#[test]
+fn hue_distance_lt_half() {
+    assert_eq!(hue_distance(0.2, 0.5), 0.3);
+    assert_eq!(hue_distance(0.5, 0.2), 0.3);
+}
+
+#[test]
+fn hue_distance_gt_half() {
+    assert_eq!(hue_distance(0.2, 0.9), 0.3);
+    assert_eq!(hue_distance(0.9, 0.2), 0.3);
 }
 
 #[derive(Clone, Debug)]
@@ -301,14 +313,13 @@ impl Game {
                 .ord_subset_max_by_key(|&hue| {
                     self.players
                         .values()
-                        .map(|player| player.hue)
-                        .ord_subset_min_by_key(|&player_hue| {
-                            hue_distance(hue, player_hue)
-                        })
+                        .map(|player| hue_distance(hue, player.hue))
+                        .ord_subset_min()
                         .unwrap()
                 })
                 .unwrap()
         };
+        info!("selected hue {}", hue);
         let lab_hue = LabHue::from_degrees(hue * 360.0);
         let static_state = StaticPlayerState {
             color: Lch::new(75.0, 80.0, lab_hue).into(),
