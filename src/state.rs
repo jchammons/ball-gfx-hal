@@ -62,8 +62,8 @@ impl Connecting {
         cursor: Point2<f32>,
     ) -> Result<Connecting, networking::Error> {
         let (server, _) = server::host(addr)?;
-        let (client, done) =
-            client::connect(addr, debug.network_tx.clone(), cursor)?;
+        let (client, done, _) =
+            client::connect(addr, Some(debug.network_tx.clone()), cursor)?;
         Ok(Connecting {
             server: Some(server),
             client,
@@ -76,8 +76,8 @@ impl Connecting {
         debug: &DebugState,
         cursor: Point2<f32>,
     ) -> Result<Connecting, networking::Error> {
-        let (client, done) =
-            client::connect(addr, debug.network_tx.clone(), cursor)?;
+        let (client, done, _) =
+            client::connect(addr, Some(debug.network_tx.clone()), cursor)?;
         Ok(Connecting {
             server: None,
             client,

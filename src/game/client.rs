@@ -118,7 +118,7 @@ impl<'a, S: SnapshotView<'a>> Players<'a, S> {
 
 impl GameHandle {
     pub fn event(&self, event: Event) {
-        self.events.send(event).unwrap();
+        let _ = self.events.send(event);
     }
 
     pub fn latest_input(&self) -> Input {
