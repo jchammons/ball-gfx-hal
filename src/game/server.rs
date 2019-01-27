@@ -1,4 +1,5 @@
 use crate::game::{
+    physics::{self, check_collision, resolve_collision},
     step_dt,
     Ball,
     Event,
@@ -8,10 +9,8 @@ use crate::game::{
     RoundState,
     Snapshot,
     StaticPlayerState,
-    BALL_RADIUS,
-    CURSOR_RADIUS,
 };
-use log::{debug, info, trace};
+use log::info;
 use nalgebra::Point2;
 use ord_subset::OrdSubsetIterExt;
 use palette::{LabHue, Lch};
@@ -145,117 +144,53 @@ impl Game {
             // Check for collisions between balls.
             let mut collisions = SmallVec::<[_; 2]>::new();
             for (&id_a, a) in self.players.iter() {
-                let a = &a.state.ball;
                 for (&id_b, b) in self.players.iter() {
-                    let b = &b.state.ball;
-
                     // This ensures every unordered pair only gets checked
                     // once.
                     if id_a < id_b {
-                        let a_to_b = b.position - a.position;
-                        let dist_sq = a_to_b.norm_squared();
-                        trace!(
-                            "distance from {} to {}: {}",
-                            id_a,
-                            id_b,
-                            dist_sq.sqrt()
-                        );
-                        if dist_sq < 4.0 * BALL_RADIUS * BALL_RADIUS {
-                            let penetration_dist =
-                                2.0 * BALL_RADIUS - dist_sq.sqrt();
-                            debug!(
-                                "collision between {} and {} ({})",
-                                id_a, id_b, penetration_dist
-                            );
-                            let vel = a_to_b *
-                                (b.velocity - a.velocity).dot(&a_to_b) /
-                                dist_sq;
-                            // Normalize using previously computed distance.
-                            collisions.push((
-                                id_a,
-                                id_b,
-                                penetration_dist,
-                                a_to_b / dist_sq.sqrt(),
-                                vel,
-                            ));
+                        let mut circle_a = a.state.ball.into();
+                        let mut circle_b = b.state.ball.into();
+                        if resolve_collision(&mut circle_a, &mut circle_b) {
+                            collisions.push((id_a, circle_a));
+                            collisions.push((id_b, circle_b));
                         }
                     }
                 }
             }
 
-            // Process collisions between balls.
-            for (id_a, id_b, penetration, a_to_b, vel) in collisions.into_iter()
-            {
-                let bounce = |player: &mut Player, sign| {
-                    let position = &mut player.state.ball.position;
-                    let velocity = &mut player.state.ball.velocity;
-
-                    // Get penetration along the velocity vector.
-                    let penetration_vel =
-                        0.5 * velocity.dot(&a_to_b).abs() * penetration;
-                    // Move player out of collision (* 0.5 because there are two
-                    // balls).
-                    *position -= velocity.normalize() * penetration_vel;
-                    // Update velocity
-                    *velocity -= sign * vel;
-                    // Get penetration along the new velocity vector.
-                    let penetration_vel =
-                        0.5 * velocity.dot(&a_to_b).abs() * penetration;
-                    // Repeat remaining movement in the new direction.
-                    *position += velocity.normalize() * penetration_vel;
-                };
-                bounce(self.players.get_mut(&id_a).unwrap(), -1.0);
-                bounce(self.players.get_mut(&id_b).unwrap(), 1.0);
+            // Process collisions updates.
+            for (id, circle) in collisions.into_iter() {
+                self.players.get_mut(&id).unwrap().state.ball = circle.into();
             }
-
-            let mut deaths = SmallVec::<[_; 2]>::new();
 
             // Check for collisions with walls.
             for (&id, player) in self.players.iter_mut() {
                 let alive = player.state.alive();
-                let position = &mut player.state.ball.position;
-                let velocity = &mut player.state.ball.velocity;
-
-                // Determine if player's ball intersects the boundary.
-                let distance_sq = (*position - Point2::origin()).norm_squared();
-                if distance_sq > (1.0 - BALL_RADIUS) * (1.0 - BALL_RADIUS) {
-                    let distance = distance_sq.sqrt();
-                    let normal = -(*position - Point2::origin()) / distance;
-                    let penetration = distance - (1.0 - BALL_RADIUS) + 0.001;
+                let mut circle = player.state.ball.into();
+                if resolve_collision(&mut circle, &mut physics::bounds()) {
+                    player.state.ball = circle.into();
                     if alive {
-                        info!("{} hit the wall and died", id);
-                        deaths.push(id);
+                        info!("{} killed {}", id, id);
+                        player.state.cursor = None;
                     }
-                    debug!(
-                        "collision between {} and boundary circle ({})",
-                        id, penetration
-                    );
-                    // Get penetration along the velocity vector.
-                    let penetration_vel =
-                        velocity.dot(&normal).abs() * penetration;
-                    // Move player out of collision.
-                    *position += normal * penetration;
-                    // Update velocity, reflecting across the normal.
-                    *velocity += 2.0 * normal * velocity.dot(&normal).abs();
-                    // Repeat remaining movement in the new direction.
-                    *position += velocity.normalize() * penetration_vel;
                 }
             }
 
+            let mut deaths = SmallVec::<[_; 1]>::new();
+
             // Check for collisions with cursor.
             for (&id, player) in self.players.iter() {
-                if let Some(ref cursor) = player.state.cursor {
+                if let Some(cursor) = player.state.cursor {
+                    let circle_cursor = physics::cursor(cursor);
                     for (&id_ball, player_ball) in self.players.iter() {
                         if id == id_ball {
                             // Don't let players kill themselves.
                             // TODO make this configurable
                             continue;
                         }
-                        let ball = player_ball.state.ball.position;
-                        let distance_sq =
-                            nalgebra::distance_squared(&ball, cursor);
-                        let min_distance = BALL_RADIUS + CURSOR_RADIUS;
-                        if distance_sq < min_distance * min_distance {
+
+                        let circle_ball = player_ball.state.ball.into();
+                        if check_collision(&circle_cursor, &circle_ball) {
                             info!("{} killed {}", id_ball, id);
                             deaths.push(id);
                         }

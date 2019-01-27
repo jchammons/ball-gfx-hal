@@ -64,14 +64,14 @@ fn main() {
             thread.join().unwrap();
         },
         (None, Some(addr)) => {
-            // Generate random cursor position within the inner 50% of the
+            // Generate random cursor position within the inner 30% of the
             // circle.
             let mut rng = thread_rng();
             // Rejection sampling because I'm lazy...
             let cursor = loop {
                 let cursor = Point2::new(
-                    rng.gen_range(-0.5, 0.5),
-                    rng.gen_range(-0.5, 0.5),
+                    rng.gen_range(-0.3, 0.3),
+                    rng.gen_range(-0.3, 0.3),
                 );
                 if cursor.coords.norm_squared() < 0.5 * 0.5 {
                     break cursor;

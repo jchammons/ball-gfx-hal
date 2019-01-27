@@ -8,6 +8,7 @@ use std::iter;
 use std::ops::Deref;
 
 pub mod client;
+pub mod physics;
 pub mod server;
 pub mod snapshot;
 
@@ -69,6 +70,74 @@ pub struct PlayerState {
     /// Position of the cursor, if the player is still alive.
     pub cursor: Option<Point2<f32>>,
     pub ball: Ball,
+}
+
+impl Ball {
+    /// Gets the starting state of the ball for a given starting
+    /// cursor position.
+    pub fn starting(cursor: Point2<f32>) -> Ball {
+        let cursor_dir = (cursor - Point2::origin()).normalize();
+        let mut position = cursor + cursor_dir * BALL_START_DISTANCE;
+        if nalgebra::distance(&position, &Point2::origin()) > 1.0 - BALL_RADIUS
+        {
+            position.coords.normalize_mut();
+            position *= 1.0 - BALL_RADIUS;
+        }
+        Ball {
+            position,
+            velocity: cursor_dir * BALL_START_SPEED,
+        }
+    }
+
+    /// Steps the ball forward in time using a provided cursor
+    /// location.
+    pub fn tick(&mut self, dt: f32, cursor: Option<Point2<f32>>) {
+        if let Some(cursor) = cursor {
+            let displacement = self.position - cursor;
+            self.velocity -= SPRING_CONSTANT * displacement * dt;
+        }
+        self.position += self.velocity * dt;
+    }
+}
+
+/// Clamps a cursor position within bounds.
+pub fn clamp_cursor(cursor: Point2<f32>) -> Point2<f32> {
+    let dist_sq = (cursor - Point2::origin()).norm_squared();
+    if dist_sq > (1.0 - CURSOR_RADIUS) {
+        (1.0 - CURSOR_RADIUS) * cursor / dist_sq.sqrt()
+    } else {
+        cursor
+    }
+}
+
+impl PlayerState {
+    /// Creates a new player state given a cursor position.
+    ///
+    /// The player's ball is placed a set distance further away from
+    /// the origin than the cursor.
+    pub fn new(cursor: Point2<f32>) -> PlayerState {
+        PlayerState {
+            cursor: Some(cursor),
+            ball: Ball::starting(cursor),
+        }
+    }
+
+    /// Sets the cursor position, if the player is still alive.
+    pub fn set_cursor(&mut self, cursor: Point2<f32>) {
+        if let Some(ref mut alive_cursor) = self.cursor {
+            *alive_cursor = cursor;
+        }
+    }
+
+    /// Steps the player forward in time.
+    pub fn tick(&mut self, dt: f32) {
+        self.ball.tick(dt, self.cursor);
+    }
+
+    /// Returns whether the player is still alive.
+    pub fn alive(&self) -> bool {
+        self.cursor.is_some()
+    }
 }
 
 /// A trait for any system of querying player state.
@@ -164,72 +233,4 @@ impl RoundState {
 pub fn step_dt(dt: f32, max: f32) -> impl Iterator<Item = f32> {
     let times = (dt / max) as usize;
     iter::repeat(max).take(times).chain(iter::once(dt % max))
-}
-
-impl Ball {
-    /// Gets the starting state of the ball for a given starting
-    /// cursor position.
-    pub fn starting(cursor: Point2<f32>) -> Ball {
-        let cursor_dir = (cursor - Point2::origin()).normalize();
-        let mut position = cursor + cursor_dir * BALL_START_DISTANCE;
-        if nalgebra::distance(&position, &Point2::origin()) > 1.0 - BALL_RADIUS
-        {
-            position.coords.normalize_mut();
-            position *= 1.0 - BALL_RADIUS;
-        }
-        Ball {
-            position,
-            velocity: cursor_dir * BALL_START_SPEED,
-        }
-    }
-
-    /// Steps the ball forward in time using a provided cursor
-    /// location.
-    pub fn tick(&mut self, dt: f32, cursor: Option<Point2<f32>>) {
-        if let Some(cursor) = cursor {
-            let displacement = self.position - cursor;
-            self.velocity -= SPRING_CONSTANT * displacement * dt;
-        }
-        self.position += self.velocity * dt;
-    }
-}
-
-/// Clamps a cursor position within bounds.
-pub fn clamp_cursor(cursor: Point2<f32>) -> Point2<f32> {
-    let dist_sq = (cursor - Point2::origin()).norm_squared();
-    if dist_sq > (1.0 - CURSOR_RADIUS) {
-        (1.0 - CURSOR_RADIUS) * cursor / dist_sq.sqrt()
-    } else {
-        cursor
-    }
-}
-
-impl PlayerState {
-    /// Creates a new player state given a cursor position.
-    ///
-    /// The player's ball is placed a set distance further away from
-    /// the origin than the cursor.
-    pub fn new(cursor: Point2<f32>) -> PlayerState {
-        PlayerState {
-            cursor: Some(cursor),
-            ball: Ball::starting(cursor),
-        }
-    }
-
-    /// Sets the cursor position, if the player is still alive.
-    pub fn set_cursor(&mut self, cursor: Point2<f32>) {
-        if let Some(ref mut alive_cursor) = self.cursor {
-            *alive_cursor = cursor;
-        }
-    }
-
-    /// Steps the player forward in time.
-    pub fn tick(&mut self, dt: f32) {
-        self.ball.tick(dt, self.cursor);
-    }
-
-    /// Returns whether the player is still alive.
-    pub fn alive(&self) -> bool {
-        self.cursor.is_some()
-    }
 }
