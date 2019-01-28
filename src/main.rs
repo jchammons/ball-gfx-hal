@@ -166,7 +166,7 @@ fn run_gui() {
             game_state.draw(now, &mut circle_rend, &mut ctx, &debug);
         });
         if let Err(_) = result {
-            graphics::renderdoc::trigger_capture(&mut renderdoc, 3);
+            // graphics::renderdoc::trigger_capture(&mut renderdoc, 3);
         }
     }
 
