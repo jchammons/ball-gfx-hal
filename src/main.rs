@@ -1,8 +1,7 @@
-#![feature(duration_float, range_contains, exact_size_is_empty, copy_within)]
+#![feature(duration_float, range_contains, copy_within)]
 
 extern crate gfx_backend_vulkan as backend;
 use ctrlc;
-use gfx_hal::PresentMode;
 use imgui::ImGui;
 use imgui_winit::ImGuiWinit;
 use nalgebra::Point2;
@@ -102,12 +101,7 @@ fn run_gui() {
 
     let instance = backend::Instance::create("Ball", 1);
     let surface = instance.create_surface(&window);
-    let mut graphics = graphics::Graphics::new(
-        &instance,
-        surface,
-        &mut imgui,
-        PresentMode::Immediate,
-    );
+    let mut graphics = graphics::Graphics::new(&instance, surface, &mut imgui);
     let mut circle_rend = graphics::CircleRenderer::new(&mut graphics);
 
     let mut renderdoc = graphics::renderdoc::init();
