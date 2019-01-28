@@ -103,6 +103,7 @@ pub struct Graphics<B: Backend> {
     imgui_renderer: imgui_gfx_hal::Renderer<B>,
     color_format: Format,
     present_mode: PresentMode,
+    supported_present_modes: Vec<PresentMode>,
     cleanup: ArrayVec<[SmallVec<[Cleanup<B>; 3]>; MAX_FRAMES]>,
     current_frame: usize,
     swapchain_update: bool,
@@ -117,16 +118,11 @@ pub struct Graphics<B: Backend> {
 pub struct Cleanup<B: Backend> {
     framebuffers: Vec<B::Framebuffer>,
     frame_views: Vec<B::ImageView>,
-    pipeline: Option<B::GraphicsPipeline>,
 }
 
 pub struct DrawContext<'a, 'b, 'c, B: Backend> {
-    device: &'c B::Device,
-    render_pass: &'c B::RenderPass,
     encoder: &'a mut RenderPassInlineEncoder<'b, B>,
     viewport: &'c Viewport,
-    update_viewport: bool,
-    cleanup: Option<&'a mut Cleanup<B>>,
 }
 
 #[cfg(feature = "renderdoc")]
@@ -214,7 +210,6 @@ impl<B: Backend> Graphics<B> {
         instance: &I,
         mut surface: B::Surface,
         imgui: &mut ImGui,
-        present_mode: PresentMode,
     ) -> Graphics<B> {
         let mut adapters =
             instance.enumerate_adapters().into_iter().sorted_by(|a, b| {
@@ -291,7 +286,19 @@ impl<B: Backend> Graphics<B> {
 
         // Determine image capabilities and color format
         // TODO figure out what available present modes are
-        let (_, formats, ..) = surface.compatibility(physical_device);
+        let (_, formats, supported_present_modes, _) =
+            surface.compatibility(physical_device);
+
+        // Select present mode.
+        let present_mode =
+            if supported_present_modes.contains(&PresentMode::Mailbox) {
+                // Use mailbox if available.
+                PresentMode::Mailbox
+            } else {
+                // Otherwise default to immediate.
+                PresentMode::Immediate
+            };
+
         let color_format = formats.map_or(Format::Rgba8Unorm, |formats| {
             formats
                 .iter()
@@ -377,7 +384,8 @@ impl<B: Backend> Graphics<B> {
             .collect();
         // Allocate a separate command pool for each frame, to allow
         // resetting the corresponding command buffers individually.
-        let mut frame_command_pools: ArrayVec<[_; 2]> = (0..MAX_FRAMES)
+        let mut frame_command_pools: ArrayVec<[_; MAX_FRAMES]> = (0..
+            MAX_FRAMES)
             .map(|_| {
                 unsafe {
                     device
@@ -449,7 +457,12 @@ impl<B: Backend> Graphics<B> {
             viewport_update: false,
             first_frame: true,
             present_mode,
+            supported_present_modes,
         }
+    }
+
+    pub fn supported_present_modes(&self) -> &[PresentMode] {
+        &self.supported_present_modes
     }
 
     pub fn present_mode(&self) -> PresentMode {
@@ -514,7 +527,6 @@ impl<B: Backend> Graphics<B> {
                     cleanup = Some(Cleanup {
                         framebuffers,
                         frame_views,
-                        pipeline: None,
                     });
                     SwapchainState::new(
                         device,
@@ -648,12 +660,8 @@ impl<B: Backend> Graphics<B> {
 
                 {
                     let ctx = DrawContext {
-                        device: &self.device,
-                        render_pass: &self.render_pass,
                         encoder: &mut encoder,
                         viewport: &self.swapchain_state.viewport,
-                        update_viewport: self.viewport_update,
-                        cleanup: cleanup.as_mut(),
                     };
                     draw_fn(ctx);
                 }
@@ -774,13 +782,9 @@ impl<B: Backend> Cleanup<B> {
         let Cleanup {
             framebuffers,
             frame_views,
-            pipeline,
             ..
         } = self;
         unsafe {
-            if let Some(pipeline) = pipeline {
-                device.destroy_graphics_pipeline(pipeline);
-            }
             for framebuffer in framebuffers {
                 device.destroy_framebuffer(framebuffer);
             }

@@ -4,6 +4,7 @@ use crate::ui;
 use crossbeam::channel::{self, Receiver, Sender};
 use gfx_hal::{Backend, PresentMode};
 use imgui::{im_str, ImString, Ui};
+use smallvec::SmallVec;
 use std::time::Duration;
 
 const NETWORK_HISTORY_LENGTH: usize = 256;
@@ -180,23 +181,25 @@ impl DebugState {
                     )))
                     .build();
 
+                let supported = graphics.supported_present_modes();
+                let labels = supported
+                    .iter()
+                    .map(|present_mode| {
+                        match present_mode {
+                            PresentMode::Immediate => im_str!("immediate"),
+                            PresentMode::Relaxed => im_str!("relaxed"),
+                            PresentMode::Fifo => im_str!("fifo"),
+                            PresentMode::Mailbox => im_str!("mailbox"),
+                        }
+                    })
+                    .collect::<SmallVec<[_; 4]>>();
                 let mut present_mode = graphics.present_mode();
                 if ui::enum_combo(
                     &ui,
                     im_str!("Present mode"),
                     &mut present_mode,
-                    &[
-                        im_str!("immediate"),
-                        im_str!("relaxed"),
-                        im_str!("fifo"),
-                        im_str!("mailbox"),
-                    ],
-                    &[
-                        PresentMode::Immediate,
-                        PresentMode::Relaxed,
-                        PresentMode::Fifo,
-                        PresentMode::Mailbox,
-                    ],
+                    &labels,
+                    supported,
                     4,
                 ) {
                     graphics.set_present_mode(present_mode);

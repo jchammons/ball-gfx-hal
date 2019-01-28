@@ -24,7 +24,6 @@ use gfx_hal::{
         ShaderStageFlags,
         Specialization,
         VertexBufferDesc,
-        Viewport,
     },
     Backend,
     DescriptorPool,
@@ -72,76 +71,6 @@ pub struct CircleRenderer<B: Backend> {
     vs_module: B::ShaderModule,
     fs_module: B::ShaderModule,
     pipeline: B::GraphicsPipeline,
-}
-
-fn create_pipeline<'a, B: Backend>(
-    device: &B::Device,
-    vs_module: &'a B::ShaderModule,
-    fs_module: &'a B::ShaderModule,
-    pipeline_layout: &'a B::PipelineLayout,
-    render_pass: &'a B::RenderPass,
-    viewport: &Viewport,
-) -> B::GraphicsPipeline {
-    let vs_entry = EntryPoint {
-        entry: "main",
-        module: vs_module,
-        specialization: Specialization::default(),
-    };
-    let fs_entry = EntryPoint {
-        entry: "main",
-        module: fs_module,
-        specialization: Specialization::default(),
-    };
-
-    let shader_entries = GraphicsShaderSet {
-        vertex: vs_entry,
-        hull: None,
-        domain: None,
-        geometry: None,
-        fragment: Some(fs_entry),
-    };
-
-    let subpass = Subpass {
-        index: 0,
-        main_pass: render_pass,
-    };
-
-    let mut pipeline_desc = GraphicsPipelineDesc::new(
-        shader_entries,
-        Primitive::TriangleStrip,
-        Rasterizer {
-            cull_face: Face::NONE,
-            ..Rasterizer::FILL
-        },
-        pipeline_layout,
-        subpass,
-    );
-
-    // Enable blending (for fake AA).
-    pipeline_desc
-        .blender
-        .targets
-        .push(ColorBlendDesc(ColorMask::ALL, BlendState::ALPHA));
-
-    pipeline_desc.vertex_buffers.push(VertexBufferDesc {
-        binding: 0,
-        stride: mem::size_of::<Vertex>() as u32,
-        rate: 0,
-    });
-
-    pipeline_desc.attributes.push(AttributeDesc {
-        location: 0,
-        binding: 0,
-        element: Element {
-            format: Format::Rg32Float,
-            offset: 0,
-        },
-    });
-
-    pipeline_desc.baked_states.viewport = Some(viewport.clone());
-    pipeline_desc.baked_states.scissor = Some(viewport.rect);
-
-    unsafe { device.create_graphics_pipeline(&pipeline_desc, None).unwrap() }
 }
 
 impl<B: Backend> CircleRenderer<B> {
@@ -277,14 +206,69 @@ impl<B: Backend> CircleRenderer<B> {
                 )
                 .unwrap()
         };
-        let pipeline = create_pipeline::<B>(
-            &graphics.device,
-            &vs_module,
-            &fs_module,
+
+        let vs_entry = EntryPoint {
+            entry: "main",
+            module: &vs_module,
+            specialization: Specialization::default(),
+        };
+        let fs_entry = EntryPoint {
+            entry: "main",
+            module: &fs_module,
+            specialization: Specialization::default(),
+        };
+
+        let shader_entries = GraphicsShaderSet {
+            vertex: vs_entry,
+            hull: None,
+            domain: None,
+            geometry: None,
+            fragment: Some(fs_entry),
+        };
+
+        let subpass = Subpass {
+            index: 0,
+            main_pass: &graphics.render_pass,
+        };
+
+        let mut pipeline_desc = GraphicsPipelineDesc::new(
+            shader_entries,
+            Primitive::TriangleStrip,
+            Rasterizer {
+                cull_face: Face::NONE,
+                ..Rasterizer::FILL
+            },
             &pipeline_layout,
-            &graphics.render_pass,
-            &graphics.swapchain_state.viewport,
+            subpass,
         );
+
+        // Enable blending (for fake AA).
+        pipeline_desc
+            .blender
+            .targets
+            .push(ColorBlendDesc(ColorMask::ALL, BlendState::ALPHA));
+
+        pipeline_desc.vertex_buffers.push(VertexBufferDesc {
+            binding: 0,
+            stride: mem::size_of::<Vertex>() as u32,
+            rate: 0,
+        });
+
+        pipeline_desc.attributes.push(AttributeDesc {
+            location: 0,
+            binding: 0,
+            element: Element {
+                format: Format::Rg32Float,
+                offset: 0,
+            },
+        });
+
+        let pipeline = unsafe {
+            graphics
+                .device
+                .create_graphics_pipeline(&pipeline_desc, None)
+                .unwrap()
+        };
 
         // When transfer is finished, delete the staging buffers.
         unsafe {
@@ -313,25 +297,6 @@ impl<B: Backend> CircleRenderer<B> {
         ctx: &mut DrawContext<B>,
         circles: I,
     ) {
-        if ctx.update_viewport {
-            let cleanup = ctx.cleanup.as_mut().unwrap();
-
-            // Silly hack to prevent calling draw more than once in a
-            // frame from creating a pipeline each time.
-            if let None = cleanup.pipeline {
-                let pipeline = create_pipeline::<B>(
-                    ctx.device,
-                    &self.vs_module,
-                    &self.fs_module,
-                    &self.pipeline_layout,
-                    ctx.render_pass,
-                    &ctx.viewport,
-                );
-                let old_pipeline = mem::replace(&mut self.pipeline, pipeline);
-                cleanup.pipeline = Some(old_pipeline);
-            }
-        }
-
         // TODO: re-use command buffers
         unsafe {
             ctx.encoder.bind_vertex_buffers(
@@ -339,6 +304,8 @@ impl<B: Backend> CircleRenderer<B> {
                 [(&self.vertex_buffer, 0)].iter().cloned(),
             );
             ctx.encoder.bind_graphics_pipeline(&self.pipeline);
+            ctx.encoder.set_viewports(0, Some(ctx.viewport));
+            ctx.encoder.set_scissors(0, Some(&ctx.viewport.rect));
             ctx.encoder.bind_graphics_descriptor_sets(
                 &self.pipeline_layout,
                 0,
