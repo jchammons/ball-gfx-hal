@@ -37,9 +37,11 @@ pub struct Players<'a, S> {
 }
 
 pub struct Game {
-    players: HashMap<PlayerId, StaticPlayerState>,
+    pub players: HashMap<PlayerId, StaticPlayerState>,
+    pub last_round: Option<RoundState>,
+    pub round: RoundState,
+    pub round_duration: f32,
     snapshots: VecDeque<(Snapshot, Instant)>,
-    round: RoundState,
     settings: GameSettings,
     settings_handle: Arc<SettingsHandle>,
     cursor: Arc<Mutex<Point2<f32>>>,
@@ -159,6 +161,8 @@ impl Game {
     pub fn new(
         players: HashMap<PlayerId, StaticPlayerState>,
         snapshot: Snapshot,
+        round: RoundState,
+        round_duration: f32,
         settings: GameSettings,
         player_id: PlayerId,
         cursor: Point2<f32>,
@@ -176,7 +180,9 @@ impl Game {
             snapshots,
             cursor: cursor.clone(),
             events: events_rx,
-            round: RoundState::default(),
+            round,
+            last_round: None,
+            round_duration,
             player_id,
             settings,
             settings_handle: Arc::clone(&settings_handle),
@@ -209,6 +215,8 @@ impl Game {
             match event {
                 Event::RoundState(round) => {
                     info!("transitioning to round state {:?}", round);
+                    self.last_round = Some(self.round);
+                    self.round_duration = 0.0;
                     self.round = round;
                 },
                 Event::Settings(settings) => {
@@ -240,8 +248,8 @@ impl Game {
 
     /// Steps client prediction forward in time.
     pub fn tick(&mut self, dt: f32) {
+        self.round_duration += dt;
         self.handle_events();
-        self.round.tick(dt);
     }
 
     /// Updates the cursor position for this client player.

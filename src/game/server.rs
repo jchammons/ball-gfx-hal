@@ -57,6 +57,7 @@ pub struct Player {
 pub struct Game {
     pub players: HashMap<PlayerId, Player>,
     pub round: RoundState,
+    pub round_duration: f32,
     pub settings: GameSettings,
     next_id: PlayerId,
 }
@@ -125,11 +126,48 @@ impl Game {
         }
     }
 
+    fn switch_round(&mut self, round: RoundState) {
+        self.round = round;
+        self.round_duration = 0.0;
+    }
+
     /// Steps the whole game world forward in time.
     pub fn tick(&mut self, dt: f32) -> impl Iterator<Item = Event> {
-        let transition = self.round.tick(dt);
+        self.round_duration += dt;
+        let transition = match self.round {
+            RoundState::Lobby => None,
+            RoundState::Waiting => {
+                if self.round_duration > 3.0 {
+                    Some(RoundState::Round)
+                } else {
+                    None
+                }
+            },
+            RoundState::Round => None,
+            RoundState::RoundEnd => {
+                if self.round_duration > 2.0 {
+                    // If a player is still alive, they win.
+                    let winner = self
+                        .players
+                        .iter()
+                        .filter(|(_, player)| player.state.alive())
+                        .next()
+                        .map(|(&id, _)| id);
+                    Some(RoundState::Winner(winner))
+                } else {
+                    None
+                }
+            },
+            RoundState::Winner(_) => {
+                if self.round_duration > 1.0 {
+                    Some(RoundState::Waiting)
+                } else {
+                    None
+                }
+            },
+        };
         if let Some(round) = transition {
-            self.round = round;
+            self.switch_round(round);
         }
 
         if !self.round.running() {
@@ -216,15 +254,15 @@ impl Game {
         }
 
         if let RoundState::Round = self.round {
-            // End the round if there are one or less players still
-            // alive.
+            // Start the round ending if there are one or less players
+            // still alive.
             let num_alive = self
                 .players
                 .values()
                 .filter(|player| player.state.alive())
                 .count();
             if num_alive <= 1 {
-                self.round = RoundState::post_round();
+                self.switch_round(RoundState::RoundEnd);
                 return Some(Event::RoundState(self.round)).into_iter();
             }
         }
@@ -287,7 +325,7 @@ impl Game {
         // Queue a waiting round if there are two or more players.
         if let RoundState::Lobby = self.round {
             if self.players.len() >= 2 {
-                self.round = RoundState::waiting();
+                self.switch_round(RoundState::Waiting);
                 events.push(Event::RoundState(self.round));
             }
         }
@@ -306,7 +344,7 @@ impl Game {
         events.push(Event::RemovePlayer(id));
         // If there are less than two players left, stop the round.
         if self.players.len() < 2 {
-            self.round = RoundState::Lobby;
+            self.switch_round(RoundState::Lobby);
             events.push(Event::RoundState(self.round))
         }
 

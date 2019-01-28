@@ -1,5 +1,4 @@
 use crate::graphics::Circle;
-use enum_kinds::EnumKind;
 use nalgebra::{self, Point2, Vector2};
 use palette::LinSrgb;
 use serde::{Deserialize, Serialize};
@@ -17,17 +16,18 @@ pub use self::snapshot::*;
 pub type PlayerId = u16;
 
 /// Finite state machine for the round state.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, EnumKind)]
-#[enum_kind(RoundStateKind)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum RoundState {
     /// Less than two players, so nothing happens.
     Lobby,
     /// More than two players, waiting for a round to start.
-    Waiting(f32),
+    Waiting,
     /// More than one player left alive.
     Round,
-    /// One or less players alive, waiting for the round to end.
-    PostRound(f32),
+    /// One or less players left alive, waiting to end the round.
+    RoundEnd,
+    /// Winner declared, starting the next round.
+    Winner(Option<PlayerId>),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,46 +212,13 @@ impl Default for RoundState {
 }
 
 impl RoundState {
-    /// Waiting state, for the default initial time.
-    pub fn waiting() -> RoundState {
-        RoundState::Waiting(3.0) // 3 seconds
-    }
-
-    /// Post-round state, for the default initial time.
-    pub fn post_round() -> RoundState {
-        RoundState::PostRound(3.0) // 3 seconds
-    }
-
     /// Whether a round is actually running in this state.
     pub fn running(self) -> bool {
         match self {
-            RoundState::Round | RoundState::PostRound(_) => true,
+            RoundState::Round => true,
+            RoundState::RoundEnd => true,
             _ => false,
         }
-    }
-
-    /// Tick any timers on this state, returning a possible transition.
-    ///
-    /// The reason that this doesn't just transition itself is that
-    /// sometimes you want to ignore the transition. For example, the
-    /// client should just wait for a message from the server.
-    pub fn tick(&mut self, dt: f32) -> Option<RoundState> {
-        match self {
-            RoundState::Waiting(ref mut time) => {
-                *time -= dt;
-                if *time < 0.0 {
-                    return Some(RoundState::Round);
-                }
-            },
-            RoundState::PostRound(ref mut time) => {
-                *time -= dt;
-                if *time < 0.0 {
-                    return Some(RoundState::waiting());
-                }
-            },
-            _ => (),
-        }
-        None
     }
 }
 

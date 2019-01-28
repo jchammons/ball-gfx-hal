@@ -5,7 +5,7 @@ use crate::game::{
     GameSettings,
     GetPlayer,
     PlayerId,
-    RoundStateKind,
+    RoundState,
     Snapshot,
     StaticPlayerState,
 };
@@ -60,6 +60,8 @@ pub enum ServerPacket {
         id: PlayerId,
         settings: GameSettings,
         players: HashMap<PlayerId, StaticPlayerState>,
+        round: RoundState,
+        round_duration: f32,
         snapshot: Snapshot,
     },
 }
@@ -154,7 +156,7 @@ impl ServerPacket {
             ServerPacket::Event(Event::RoundState(round)) => {
                 // Only resend if the round state hasn't
                 // changed again since it was sent.
-                RoundStateKind::from(round) == RoundStateKind::from(game.round)
+                *round == game.round
             },
             ServerPacket::Event(Event::Settings(settings)) => {
                 // Only resend if the round state hasn't
@@ -444,6 +446,8 @@ impl Server {
                 .players()
                 .map(|(id, player)| (id, player.static_state().clone()))
                 .collect(),
+            round: self.game.round,
+            round_duration: self.game.round_duration,
             snapshot: self.game.snapshot(),
         };
         let (packet, _) = client.encode(&packet);
