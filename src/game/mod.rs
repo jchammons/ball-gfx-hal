@@ -14,11 +14,6 @@ pub mod snapshot;
 
 pub use self::snapshot::*;
 
-pub const BALL_RADIUS: f32 = 0.15;
-pub const CURSOR_RADIUS: f32 = 0.05;
-const SPRING_CONSTANT: f32 = 8.0;
-const BALL_START_DISTANCE: f32 = 0.3;
-const BALL_START_SPEED: f32 = 1.0;
 pub type PlayerId = u16;
 
 /// Finite state machine for the round state.
@@ -35,9 +30,33 @@ pub enum RoundState {
     PostRound(f32),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GameSettings {
+    pub ball_radius: f32,
+    pub cursor_radius: f32,
+    pub spring_constant: f32,
+    pub ball_start_distance: f32,
+    pub ball_start_speed: f32,
+    pub bounds_radius: f32,
+}
+
+impl Default for GameSettings {
+    fn default() -> GameSettings {
+        GameSettings {
+            ball_radius: 0.15,
+            cursor_radius: 0.05,
+            spring_constant: 8.0,
+            ball_start_distance: 0.3,
+            ball_start_speed: 1.0,
+            bounds_radius: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     RoundState(RoundState),
+    Settings(GameSettings),
     NewPlayer {
         id: PlayerId,
         static_state: StaticPlayerState,
@@ -75,36 +94,47 @@ pub struct PlayerState {
 impl Ball {
     /// Gets the starting state of the ball for a given starting
     /// cursor position.
-    pub fn starting(cursor: Point2<f32>) -> Ball {
+    pub fn starting(cursor: Point2<f32>, settings: &GameSettings) -> Ball {
         let cursor_dir = (cursor - Point2::origin()).normalize();
-        let mut position = cursor + cursor_dir * BALL_START_DISTANCE;
-        if nalgebra::distance(&position, &Point2::origin()) > 1.0 - BALL_RADIUS
+        let mut position = cursor + cursor_dir * settings.ball_start_distance;
+        let max_dist = settings.bounds_radius - settings.ball_radius;
+        if nalgebra::distance_squared(&position, &Point2::origin()) >
+            max_dist * max_dist
         {
             position.coords.normalize_mut();
-            position *= 1.0 - BALL_RADIUS;
+            position *= max_dist;
         }
         Ball {
             position,
-            velocity: cursor_dir * BALL_START_SPEED,
+            velocity: cursor_dir * settings.ball_start_speed,
         }
     }
 
     /// Steps the ball forward in time using a provided cursor
     /// location.
-    pub fn tick(&mut self, dt: f32, cursor: Option<Point2<f32>>) {
+    pub fn tick(
+        &mut self,
+        dt: f32,
+        cursor: Option<Point2<f32>>,
+        settings: &GameSettings,
+    ) {
         if let Some(cursor) = cursor {
             let displacement = self.position - cursor;
-            self.velocity -= SPRING_CONSTANT * displacement * dt;
+            self.velocity -= settings.spring_constant * displacement * dt;
         }
         self.position += self.velocity * dt;
     }
 }
 
 /// Clamps a cursor position within bounds.
-pub fn clamp_cursor(cursor: Point2<f32>) -> Point2<f32> {
+pub fn clamp_cursor(
+    cursor: Point2<f32>,
+    settings: &GameSettings,
+) -> Point2<f32> {
     let dist_sq = (cursor - Point2::origin()).norm_squared();
-    if dist_sq > (1.0 - CURSOR_RADIUS) {
-        (1.0 - CURSOR_RADIUS) * cursor / dist_sq.sqrt()
+    let max_dist = settings.bounds_radius - settings.cursor_radius;
+    if dist_sq > max_dist * max_dist {
+        max_dist * cursor / dist_sq.sqrt()
     } else {
         cursor
     }
@@ -115,10 +145,10 @@ impl PlayerState {
     ///
     /// The player's ball is placed a set distance further away from
     /// the origin than the cursor.
-    pub fn new(cursor: Point2<f32>) -> PlayerState {
+    pub fn new(cursor: Point2<f32>, settings: &GameSettings) -> PlayerState {
         PlayerState {
             cursor: Some(cursor),
-            ball: Ball::starting(cursor),
+            ball: Ball::starting(cursor, settings),
         }
     }
 
@@ -130,8 +160,8 @@ impl PlayerState {
     }
 
     /// Steps the player forward in time.
-    pub fn tick(&mut self, dt: f32) {
-        self.ball.tick(dt, self.cursor);
+    pub fn tick(&mut self, dt: f32, settings: &GameSettings) {
+        self.ball.tick(dt, self.cursor, settings);
     }
 
     /// Returns whether the player is still alive.
@@ -150,7 +180,7 @@ pub trait GetPlayer {
     fn static_state(self) -> Self::StaticState;
 
     /// Generates a set of circles to draw this player.
-    fn draw(self, scale: f32) -> SmallVec<[Circle; 2]>
+    fn draw(self, scale: f32, settings: &GameSettings) -> SmallVec<[Circle; 2]>
     where
         Self: Sized + Copy,
     {
@@ -160,14 +190,14 @@ pub trait GetPlayer {
         // Ball
         circles.push(Circle {
             center: state.ball.position * scale,
-            radius: BALL_RADIUS * scale,
+            radius: settings.ball_radius * scale,
             color,
         });
         if let Some(cursor) = state.cursor {
             // Cursor, if alive
             circles.push(Circle {
                 center: cursor * scale,
-                radius: CURSOR_RADIUS * scale,
+                radius: settings.cursor_radius * scale,
                 color,
             });
         }

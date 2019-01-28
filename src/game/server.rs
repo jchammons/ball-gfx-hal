@@ -3,6 +3,7 @@ use crate::game::{
     step_dt,
     Ball,
     Event,
+    GameSettings,
     GetPlayer,
     PlayerId,
     PlayerState,
@@ -56,6 +57,7 @@ pub struct Player {
 pub struct Game {
     pub players: HashMap<PlayerId, Player>,
     pub round: RoundState,
+    pub settings: GameSettings,
     next_id: PlayerId,
 }
 
@@ -107,7 +109,7 @@ impl Game {
         }
 
         if !self.round.running() {
-            player.state.ball = Ball::starting(cursor);
+            player.state.ball = Ball::starting(cursor, &self.settings);
         }
         true
     }
@@ -135,10 +137,13 @@ impl Game {
             return transition.map(Event::RoundState).into_iter();
         }
 
+        // To avoid borrow issues.
+        let settings = &self.settings;
+
         for dt in step_dt(dt, 1.0 / 60.0) {
             // Calculate individual ball spring physics.
             for player in self.players.values_mut() {
-                player.state.tick(dt);
+                player.state.tick(dt, settings);
             }
 
             // Check for collisions between balls.
@@ -148,8 +153,10 @@ impl Game {
                     // This ensures every unordered pair only gets checked
                     // once.
                     if id_a < id_b {
-                        let mut circle_a = a.state.ball.into();
-                        let mut circle_b = b.state.ball.into();
+                        let mut circle_a =
+                            physics::ball(a.state.ball, settings);
+                        let mut circle_b =
+                            physics::ball(b.state.ball, settings);
                         if resolve_collision(&mut circle_a, &mut circle_b) {
                             collisions.push((id_a, circle_a));
                             collisions.push((id_b, circle_b));
@@ -166,8 +173,11 @@ impl Game {
             // Check for collisions with walls.
             for (&id, player) in self.players.iter_mut() {
                 let alive = player.state.alive();
-                let mut circle = player.state.ball.into();
-                if resolve_collision(&mut circle, &mut physics::bounds()) {
+                let mut circle = physics::ball(player.state.ball, settings);
+                if resolve_collision(
+                    &mut circle,
+                    &mut physics::bounds(settings),
+                ) {
                     player.state.ball = circle.into();
                     if alive {
                         info!("{} killed {}", id, id);
@@ -181,7 +191,7 @@ impl Game {
             // Check for collisions with cursor.
             for (&id, player) in self.players.iter() {
                 if let Some(cursor) = player.state.cursor {
-                    let circle_cursor = physics::cursor(cursor);
+                    let circle_cursor = physics::cursor(cursor, settings);
                     for (&id_ball, player_ball) in self.players.iter() {
                         if id == id_ball {
                             // Don't let players kill themselves.
@@ -189,7 +199,8 @@ impl Game {
                             continue;
                         }
 
-                        let circle_ball = player_ball.state.ball.into();
+                        let circle_ball =
+                            physics::ball(player_ball.state.ball, settings);
                         if check_collision(&circle_cursor, &circle_ball) {
                             info!("{} killed {}", id_ball, id);
                             deaths.push(id);
@@ -260,7 +271,7 @@ impl Game {
             color: Lch::new(75.0, 80.0, lab_hue).into(),
         };
         let player = Player {
-            state: PlayerState::new(cursor),
+            state: PlayerState::new(cursor, &self.settings),
             static_state: static_state.clone(),
             hue,
         };

@@ -1,6 +1,7 @@
 use crate::debug::{NetworkStats, NETWORK_STATS_RATE};
 use crate::game::{
     client::{Game, GameHandle},
+    GameSettings,
     Input,
 };
 use crate::networking::connection::{Connection, HEADER_BYTES};
@@ -16,13 +17,13 @@ use crate::networking::{
     PING_RATE,
 };
 use crossbeam::channel::{self, Receiver, Sender};
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use mio::net::UdpSocket;
 use mio::{Event, Poll, PollOpt, Ready, Registration, SetReadiness, Token};
 use mio_extras::timer::{self, Timeout, Timer};
 use nalgebra::Point2;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Cursor};
 use std::net::SocketAddr;
 use std::thread::{self, JoinHandle};
@@ -48,6 +49,7 @@ pub enum ClientPacket {
         /// Cursor position when connecting.
         cursor: Point2<f32>,
     },
+    Settings(GameSettings),
     Input(Input),
     Disconnect,
     Ping,
@@ -81,6 +83,7 @@ pub struct Client {
     poll: Poll,
     timeout: Timeout,
     connection: Connection,
+    reliable: HashMap<u32, ClientPacket>,
     state: ClientState,
     _shutdown: Registration,
     /// Marks after `shutdown` has been received, to shutdown when the
@@ -134,6 +137,33 @@ impl Drop for ClientHandle {
     /// Gracefully shutdown when the handle is lost.
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+impl ClientPacket {
+    fn reliable(&self) -> bool {
+        match self {
+            ClientPacket::Handshake {
+                ..
+            } => true,
+            ClientPacket::Settings(_) => true,
+            ClientPacket::Input(_) => false,
+            ClientPacket::Disconnect => false,
+            ClientPacket::Ping => false,
+            ClientPacket::Pong(_) => false,
+        }
+    }
+
+    fn resend(&self, game: Option<&GameHandle>) -> bool {
+        match self {
+            ClientPacket::Handshake {
+                ..
+            } => true,
+            ClientPacket::Settings(settings) => {
+                &game.as_ref().unwrap().settings.settings() == settings
+            },
+            _ => self.reliable(),
+        }
     }
 }
 
@@ -270,6 +300,7 @@ impl Client {
             poll,
             timeout,
             connection: Connection::default(),
+            reliable: HashMap::new(),
             state: ClientState::Connecting {
                 done,
                 cursor,
@@ -452,9 +483,20 @@ impl Client {
                 let (_, interval) = tick.next(now);
                 self.timer.set_timeout(interval, TimeoutState::Tick);
 
-                let packet = ClientPacket::Input(game.latest_input());
-                trace!("sending tick packet to server: {:?}", packet);
-                self.send(&packet)?;
+                let tick_packet = ClientPacket::Input(game.latest_input());
+                trace!("sending tick packet to server: {:?}", tick_packet);
+
+                // If the settings have changed, send that as well.
+                if let Some(settings) = game.settings.dirty() {
+                    let settings_packet = ClientPacket::Settings(settings);
+                    trace!(
+                        "sending settings update packet to server: {:?}",
+                        settings_packet
+                    );
+                    self.send(&settings_packet)?;
+                }
+
+                self.send(&tick_packet)?;
             },
             // We shouldn't really be sending ticks in any other state.
             _ => unreachable!(),
@@ -472,13 +514,38 @@ impl Client {
             return Ok(Err(RecvError::PacketTooLarge(bytes_read)));
         }
         let packet = &self.recv_buffer[0..bytes_read];
-        let (packet, sequence, _, lost) =
+        let (packet, sequence, acks, lost) =
             match self.connection.decode(Cursor::new(packet)) {
                 Ok(result) => result,
                 Err(err) => return Ok(Err(err)),
             };
+
         if let Some(ref mut stats) = self.stats {
             stats.next.packets_lost += lost.len() as u16;
+        }
+
+        // Remove acked packets from the reliable packet buffer.
+        for ack in acks.iter() {
+            self.reliable.remove(&ack);
+        }
+
+        // Possibly resend any lost packets.
+        for lost in lost.into_iter() {
+            if let Some(packet) = self.reliable.remove(&lost) {
+                let game = match self.state {
+                    ClientState::Connecting {
+                        ..
+                    } => None,
+                    ClientState::Connected {
+                        ref game,
+                        ..
+                    } => Some(game),
+                };
+                if packet.resend(game) {
+                    debug!("resending lost packet from client: {:?}", packet);
+                    self.send(&packet)?;
+                }
+            }
         }
 
         let transition = match self.state {
@@ -489,11 +556,12 @@ impl Client {
                 match packet {
                     ServerPacket::Handshake {
                         players,
+                        settings,
                         snapshot,
                         id,
                     } => {
                         let (game, game_handle) =
-                            Game::new(players, snapshot, id, *cursor);
+                            Game::new(players, snapshot, settings, id, *cursor);
                         let tick = Interval::new(TICK_RATE);
                         let ping = Interval::new(PING_RATE);
                         // Start the timer for sending input ticks and pings.
@@ -565,6 +633,10 @@ impl Client {
         bincode::serialize_into(&mut packet, contents).unwrap();
         self.send_queue.push_back(packet);
         self.reregister_socket(true)?;
+
+        if contents.reliable() {
+            self.reliable.insert(sequence, contents.clone());
+        }
 
         Ok(sequence)
     }
