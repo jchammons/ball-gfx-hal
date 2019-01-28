@@ -52,6 +52,7 @@ use log::{debug, error, info};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::mem;
+use std::time::Duration;
 use take_mut;
 
 pub mod circles;
@@ -474,14 +475,20 @@ impl<B: Backend> Graphics<B> {
         self.swapchain_update = true;
     }
 
-    /// Waits until the buffers for a new frame open up.
+    /// Waits until the buffers for a new frame open up or a timeout occurs.
+    ///
+    /// Returns `false` on timeout.
     ///
     /// This is useful to avoid input lag, since ideally inputs will
     /// be processed right before rendering, so delaying inside
     /// `draw_frame` is undesirable.
-    pub fn wait_for_frame(&self) {
+    pub fn wait_for_frame(&self, timeout: Option<Duration>) -> bool {
         let frame_fence = &self.frame_fences[self.current_frame];
-        unsafe { self.device.wait_for_fence(frame_fence, !0).unwrap() };
+        let timeout = match timeout {
+            Some(timeout) => timeout.as_nanos() as u64,
+            None => !0,
+        };
+        unsafe { self.device.wait_for_fence(frame_fence, timeout).unwrap() }
     }
 
     pub fn draw_frame<F: FnOnce(DrawContext<B>)>(

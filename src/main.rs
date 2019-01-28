@@ -7,6 +7,7 @@ use imgui_winit::ImGuiWinit;
 use nalgebra::Point2;
 use rand::{thread_rng, Rng};
 use std::net::SocketAddr;
+use std::time::Duration;
 use std::time::Instant;
 use structopt::StructOpt;
 use winit::{
@@ -107,12 +108,10 @@ fn run_gui() {
     let mut renderdoc = graphics::renderdoc::init();
 
     let mut last_frame = Instant::now();
+    let mut last_update = last_frame;
 
     let mut running = true;
     while running {
-        // Wait for vertical blank/etc. before even starting to render.
-        graphics.wait_for_frame();
-
         events_loop.poll_events(|event| {
             imgui_winit.handle_event(&mut imgui, &event);
             if let Event::WindowEvent {
@@ -147,20 +146,29 @@ fn run_gui() {
         });
 
         let now = Instant::now();
-        let frame_time = now.duration_since(last_frame).as_float_secs() as f32;
-        last_frame = now;
+        let update_time =
+            now.duration_since(last_update).as_float_secs() as f32;
+        last_update = now;
 
-        game_state.update(frame_time);
+        game_state.update(update_time);
 
-        let ui = imgui_winit.frame(&mut imgui, &window);
-        debug.ui(&ui, &mut graphics, &mut renderdoc, frame_time);
-        game_state.ui(&ui, &debug);
+        if graphics.wait_for_frame(Some(Duration::from_float_secs(1.0 / 400.0)))
+        {
+            let now = Instant::now();
+            let frame_time =
+                now.duration_since(last_frame).as_float_secs() as f32;
+            last_frame = now;
 
-        let result = graphics.draw_frame(ui, |mut ctx| {
-            game_state.draw(now, &mut circle_rend, &mut ctx, &debug);
-        });
-        if let Err(_) = result {
-            // graphics::renderdoc::trigger_capture(&mut renderdoc, 3);
+            let ui = imgui_winit.frame(&mut imgui, &window);
+            debug.ui(&ui, &mut graphics, &mut renderdoc, frame_time);
+            game_state.ui(&ui, &debug);
+
+            let result = graphics.draw_frame(ui, |mut ctx| {
+                game_state.draw(now, &mut circle_rend, &mut ctx, &debug);
+            });
+            if let Err(_) = result {
+                // graphics::renderdoc::trigger_capture(&mut renderdoc, 3);
+            }
         }
     }
 
