@@ -314,17 +314,21 @@ impl<B: Backend> CircleRenderer<B> {
         circles: I,
     ) {
         if ctx.update_viewport {
-            let pipeline = create_pipeline::<B>(
-                ctx.device,
-                &self.vs_module,
-                &self.fs_module,
-                &self.pipeline_layout,
-                ctx.render_pass,
-                &ctx.viewport,
-            );
-            let pipeline = mem::replace(&mut self.pipeline, pipeline);
-            unsafe {
-                ctx.device.destroy_graphics_pipeline(pipeline);
+            let cleanup = ctx.cleanup.as_mut().unwrap();
+
+            // Silly hack to prevent calling draw more than once in a
+            // frame from creating a pipeline each time.
+            if let None = cleanup.pipeline {
+                let pipeline = create_pipeline::<B>(
+                    ctx.device,
+                    &self.vs_module,
+                    &self.fs_module,
+                    &self.pipeline_layout,
+                    ctx.render_pass,
+                    &ctx.viewport,
+                );
+                let old_pipeline = mem::replace(&mut self.pipeline, pipeline);
+                cleanup.pipeline = Some(old_pipeline);
             }
         }
 

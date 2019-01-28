@@ -48,7 +48,8 @@ use gfx_hal::{
 use imgui::{ImGui, Ui};
 use imgui_gfx_hal;
 use itertools::Itertools;
-use log::{error, info};
+use log::{debug, error, info};
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::mem;
 use take_mut;
@@ -102,10 +103,21 @@ pub struct Graphics<B: Backend> {
     imgui_renderer: imgui_gfx_hal::Renderer<B>,
     color_format: Format,
     present_mode: PresentMode,
+    cleanup: ArrayVec<[SmallVec<[Cleanup<B>; 3]>; MAX_FRAMES]>,
     current_frame: usize,
     swapchain_update: bool,
     viewport_update: bool,
     first_frame: bool,
+}
+
+/// Resources to clean up after a particular frame is done.
+///
+/// These are created when the window resizes, since the old resources
+/// can't be destroyed until the last frame to use them has rendered.
+pub struct Cleanup<B: Backend> {
+    framebuffers: Vec<B::Framebuffer>,
+    frame_views: Vec<B::ImageView>,
+    pipeline: Option<B::GraphicsPipeline>,
 }
 
 pub struct DrawContext<'a, 'b, 'c, B: Backend> {
@@ -114,6 +126,7 @@ pub struct DrawContext<'a, 'b, 'c, B: Backend> {
     encoder: &'a mut RenderPassInlineEncoder<'b, B>,
     viewport: &'c Viewport,
     update_viewport: bool,
+    cleanup: Option<&'a mut Cleanup<B>>,
 }
 
 #[cfg(feature = "renderdoc")]
@@ -395,6 +408,8 @@ impl<B: Backend> Graphics<B> {
             global_ubo_update_command_pool.acquire_command_buffer::<OneShot>();
         let global_ubo_update_fence = device.create_fence(true).unwrap();
 
+        let cleanup = (0..MAX_FRAMES).map(|_| SmallVec::new()).collect();
+
         let swapchain_state = SwapchainState::new(
             &device,
             physical_device,
@@ -428,6 +443,7 @@ impl<B: Backend> Graphics<B> {
             global_ubo_memory,
             imgui_renderer,
             color_format,
+            cleanup,
             current_frame: 0,
             swapchain_update: false,
             viewport_update: false,
@@ -469,6 +485,7 @@ impl<B: Backend> Graphics<B> {
         let frame_finished_semaphore =
             &self.frame_finished_semaphores[self.current_frame];
 
+        let mut cleanup = None;
         if self.swapchain_update || self.viewport_update {
             let old_viewport = self.swapchain_state.viewport.clone();
 
@@ -485,8 +502,20 @@ impl<B: Backend> Graphics<B> {
                     ref mut swapchain_state,
                     ..
                 } = self;
-                device.wait_idle().unwrap();
                 take_mut::take(swapchain_state, |old| {
+                    let SwapchainState {
+                        framebuffers,
+                        frame_views,
+                        swapchain,
+                        ..
+                    } = old;
+                    // Clean up the resources from the old swapchain
+                    // when the last frame to use them is done.
+                    cleanup = Some(Cleanup {
+                        framebuffers,
+                        frame_views,
+                        pipeline: None,
+                    });
                     SwapchainState::new(
                         device,
                         &adapter.physical_device,
@@ -494,7 +523,7 @@ impl<B: Backend> Graphics<B> {
                         render_pass,
                         *color_format,
                         *present_mode,
-                        Some(old),
+                        Some(swapchain),
                     )
                 });
             }
@@ -597,6 +626,11 @@ impl<B: Backend> Graphics<B> {
         }
         let cmd_buffer = &mut self.frame_cmd_buffers[self.current_frame];
 
+        // Clean up any old resources that were waiting on this frame.
+        for cleanup in self.cleanup[self.current_frame].drain() {
+            cleanup.destroy(&self.device);
+        }
+
         unsafe {
             cmd_buffer.begin();
 
@@ -619,6 +653,7 @@ impl<B: Backend> Graphics<B> {
                         encoder: &mut encoder,
                         viewport: &self.swapchain_state.viewport,
                         update_viewport: self.viewport_update,
+                        cleanup: cleanup.as_mut(),
                     };
                     draw_fn(ctx);
                 }
@@ -645,12 +680,18 @@ impl<B: Backend> Graphics<B> {
                 signal_semaphores: Some(frame_finished_semaphore),
             };
             queue.submit(submission, Some(frame_fence));
+        }
 
-            self.current_frame = (self.current_frame + 1) % MAX_FRAMES;
-            self.swapchain_update = false;
-            self.viewport_update = false;
-            self.first_frame = false;
+        if let Some(cleanup) = cleanup {
+            self.cleanup[self.current_frame].push(cleanup);
+        }
 
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES;
+        self.swapchain_update = false;
+        self.viewport_update = false;
+        self.first_frame = false;
+
+        unsafe {
             if self
                 .swapchain_state
                 .swapchain
@@ -661,7 +702,6 @@ impl<B: Backend> Graphics<B> {
                 )
                 .is_err()
             {
-                error!("error occurred while presenting swapchain");
                 // TODO: detect if it's a bad swapchain error or not
                 self.swapchain_update = true;
                 return Err(());
@@ -688,11 +728,18 @@ impl<B: Backend> Graphics<B> {
             global_ubo,
             global_ubo_memory,
             imgui_renderer,
+            cleanup,
             ..
         } = self;
 
         device.wait_idle().unwrap();
         unsafe {
+            for cleanups in cleanup.into_iter() {
+                for cleanup in cleanups.into_iter() {
+                    cleanup.destroy(&device);
+                }
+            }
+
             device.destroy_fence(transfer_fence);
             swapchain_state.destroy(&device);
             device.destroy_command_pool(transfer_command_pool.into_raw());
@@ -721,6 +768,29 @@ impl<B: Backend> Graphics<B> {
     }
 }
 
+impl<B: Backend> Cleanup<B> {
+    /// Destroys all resources marked for cleanup.
+    fn destroy(self, device: &B::Device) {
+        let Cleanup {
+            framebuffers,
+            frame_views,
+            pipeline,
+            ..
+        } = self;
+        unsafe {
+            if let Some(pipeline) = pipeline {
+                device.destroy_graphics_pipeline(pipeline);
+            }
+            for framebuffer in framebuffers {
+                device.destroy_framebuffer(framebuffer);
+            }
+            for image_view in frame_views {
+                device.destroy_image_view(image_view);
+            }
+        }
+    }
+}
+
 impl<B: Backend> SwapchainState<B> {
     fn new(
         device: &B::Device,
@@ -729,7 +799,7 @@ impl<B: Backend> SwapchainState<B> {
         render_pass: &B::RenderPass,
         color_format: Format,
         present_mode: PresentMode,
-        old: Option<SwapchainState<B>>,
+        old: Option<B::Swapchain>,
     ) -> SwapchainState<B> {
         let (caps, ..) = surface.compatibility(physical_device);
         let extent = caps.current_extent.unwrap();
@@ -740,23 +810,10 @@ impl<B: Backend> SwapchainState<B> {
             image_count: MAX_FRAMES as u32,
             ..SwapchainConfig::from_caps(&caps, color_format, extent)
         };
-        info!(
+        debug!(
             "building swapchain at extent {},{}",
             extent.width, extent.height,
         );
-
-        // Destroy the old buffers, but keep the swapchain itself around
-        let old = old.map(|old| {
-            unsafe {
-                for framebuffer in old.framebuffers {
-                    device.destroy_framebuffer(framebuffer);
-                }
-                for image_view in old.frame_views {
-                    device.destroy_image_view(image_view);
-                }
-            }
-            old.swapchain
-        });
 
         let (swapchain, backbuffer) = unsafe {
             device.create_swapchain(surface, swapchain_config, old).unwrap()

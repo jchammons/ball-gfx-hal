@@ -240,7 +240,7 @@ impl GameState {
                 ..
             } => {
                 // TODO use the z-buffer to reduce overdraw here
-                circle_rend.draw(ctx, iter::once(bounds_circle()));
+                // circle_rend.draw(ctx, iter::once(bounds_circle()));
 
                 if debug.draw_latest_snapshot {
                     // TODO avoid submitting a second drawcall here
@@ -266,7 +266,8 @@ impl GameState {
                     .into_iter()
                     .flat_map(|(_, player)| player.draw(SCALE));
 
-                circle_rend.draw(ctx, circles);
+                circle_rend
+                    .draw(ctx, iter::once(bounds_circle()).chain(circles));
             },
         }
     }
