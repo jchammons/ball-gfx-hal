@@ -12,28 +12,28 @@ gfx-hal = "0.1.0"
 gfx-backend-vulkan = "0.1.0"
 imgui-gfx-hal = "0.1.1"
 imgui = "0.0.21"
-winit = "0.18.0"
+winit = "0.18.1"
 imgui-winit = "0.1.2"
 log = { version = "0.4.6", features = ["max_level_trace", "release_max_level_info"] }
 renderdoc = { version = "0.4.0", optional = true }
 palette = { version = "0.4.1", features = ["serde"] }
-arrayvec = { version = "0.4.8", features = ["use_union"] }
-parking_lot = "0.7.0"
+arrayvec = { version = "0.4.10", features = ["use_union"] }
+parking_lot = "0.7.1"
 bincode = "1.0.1"
-serde = "1.0.81"
-serde_derive = "1.0.81"
-rand = "0.6.1"
-failure = "0.1.3"
+serde = "1.0.85"
+serde_derive = "1.0.85"
+rand = "0.6.4"
+failure = "0.1.5"
 mio = "0.6.16"
 mio-extras = "2.0.5"
-byteorder = "1.2.7"
+byteorder = "1.3.1"
 structopt = "0.2.14"
 ctrlc = "3.1.1"
 lazy_static = "1.2.0"
-colored = "1.6.1"
-smallvec = { version = "0.6.7", features = ["union"] }
+colored = "1.7.0"
+smallvec = { version = "0.6.8", features = ["union"] }
 ord_subset = "3.1.1"
-nalgebra = { version = "0.16.12", features = ["serde-serialize"] }
+nalgebra = { version = "0.16.13", features = ["serde-serialize"] }
 either = "1.5.0"
 crossbeam = "0.6.0"
 enum-kinds = "0.4.1"
@@ -41,5 +41,5 @@ take_mut = "0.2.2"
 itertools = "0.8.0"
 
 [build-dependencies]
-shaderc = "0.3.12"
+shaderc = "0.3.13"
 walkdir = "2.2.7"
