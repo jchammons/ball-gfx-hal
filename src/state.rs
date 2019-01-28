@@ -1,11 +1,18 @@
 use crate::debug::DebugState;
-use crate::game::{clamp_cursor, client::Game, GameSettings, GetPlayer};
+use crate::game::{
+    clamp_cursor,
+    client::Game,
+    GameSettings,
+    GetPlayer,
+    RoundState,
+};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
     client::{self, ClientHandle, ConnectedHandle, ConnectingHandle},
     server::{self, ServerHandle},
 };
+use easer::functions::*;
 use gfx_hal::Backend;
 use imgui::{im_str, ImString, Ui};
 use log::{error, warn};
@@ -24,14 +31,14 @@ use winit::{
 
 const SCALE: f32 = 0.9;
 
-fn bounds_circle(settings: Option<&GameSettings>) -> Circle {
+fn bounds_circle(scale: f32, settings: Option<&GameSettings>) -> Circle {
     let bounds_radius = match settings {
         Some(settings) => settings.bounds_radius,
         None => 1.0,
     };
     Circle {
         center: Point2::new(0.0, 0.0),
-        radius: SCALE * bounds_radius,
+        radius: scale * bounds_radius,
         color: LinSrgb::new(1.0, 1.0, 1.0),
     }
 }
@@ -257,7 +264,7 @@ impl GameState {
             Screen::MainMenu {
                 ..
             } => {
-                circle_rend.draw(ctx, iter::once(bounds_circle(None)));
+                circle_rend.draw(ctx, iter::once(bounds_circle(SCALE, None)));
             },
             Screen::InGame {
                 ref mut game,
@@ -267,23 +274,71 @@ impl GameState {
 
                 game.clean_old_snapshots(now, debug.interpolation_delay);
 
+                let (round_circles, scale) = match (game.last_round, game.round)
+                {
+                    (Some(RoundState::Winner(_)), RoundState::Waiting) => {
+                        let scale = Expo::ease_out(
+                            game.round_duration,
+                            0.0,
+                            SCALE,
+                            0.3,
+                        );
+                        (None, scale)
+                    },
+                    (_, RoundState::Winner(winner)) => {
+                        // No winner is black
+                        let color = match winner {
+                            Some(id) => game.players[&id].color,
+                            None => LinSrgb::new(0.5, 0.5, 0.5),
+                        };
+                        let radius = Expo::ease_out(
+                            game.round_duration,
+                            0.0,
+                            game.settings().bounds_radius,
+                            0.3,
+                        );
+
+                        let scale = if game.round_duration > 0.5 {
+                            Expo::ease_in(
+                                game.round_duration - 0.5,
+                                SCALE,
+                                -SCALE,
+                                0.3,
+                            )
+                            .max(0.0)
+                        } else {
+                            SCALE
+                        };
+
+                        (
+                            Some(Circle {
+                                center: Point2::new(0.0, 0.0),
+                                radius: scale * radius,
+                                color,
+                            }),
+                            scale,
+                        )
+                    },
+                    _ => (None, SCALE),
+                };
+
                 let players = game.interpolated_players(
                     now,
                     clamp_cursor(self.cursor, game.settings()),
                     debug.interpolation_delay,
                 );
                 let circles = players.into_iter().flat_map(|(_, player)| {
-                    player.draw(SCALE, game.settings())
+                    player.draw(scale, game.settings())
                 });
 
-                let bounds_circle = bounds_circle(Some(game.settings()));
+                let bounds_circle = bounds_circle(scale, Some(game.settings()));
 
                 if debug.draw_latest_snapshot {
                     let players = game.latest_players();
                     let debug_circles = players
                         .into_iter()
                         .flat_map(|(_, player)| {
-                            player.draw(SCALE, game.settings())
+                            player.draw(scale, game.settings())
                         })
                         .map(|circle| {
                             Circle {
@@ -295,11 +350,16 @@ impl GameState {
                         ctx,
                         iter::once(bounds_circle)
                             .chain(debug_circles)
-                            .chain(circles),
+                            .chain(circles)
+                            .chain(round_circles),
                     );
                 } else {
-                    circle_rend
-                        .draw(ctx, iter::once(bounds_circle).chain(circles));
+                    circle_rend.draw(
+                        ctx,
+                        iter::once(bounds_circle)
+                            .chain(circles)
+                            .chain(round_circles),
+                    );
                 }
             },
         }

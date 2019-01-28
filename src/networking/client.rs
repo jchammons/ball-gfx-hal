@@ -556,12 +556,21 @@ impl Client {
                 match packet {
                     ServerPacket::Handshake {
                         players,
+                        round,
+                        round_duration,
                         settings,
                         snapshot,
                         id,
                     } => {
-                        let (game, game_handle) =
-                            Game::new(players, snapshot, settings, id, *cursor);
+                        let (game, game_handle) = Game::new(
+                            players,
+                            snapshot,
+                            round,
+                            round_duration,
+                            settings,
+                            id,
+                            *cursor,
+                        );
                         let tick = Interval::new(TICK_RATE);
                         let ping = Interval::new(PING_RATE);
                         // Start the timer for sending input ticks and pings.
