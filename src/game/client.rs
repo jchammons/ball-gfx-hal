@@ -1,5 +1,6 @@
 use crate::game::{
     Event,
+    GameSettings,
     GetPlayer,
     Input,
     InterpolatedSnapshot,
@@ -17,6 +18,7 @@ use nalgebra::Point2;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,15 +40,23 @@ pub struct Game {
     players: HashMap<PlayerId, StaticPlayerState>,
     snapshots: VecDeque<(Snapshot, Instant)>,
     round: RoundState,
+    settings: GameSettings,
+    settings_handle: Arc<SettingsHandle>,
     cursor: Arc<Mutex<Point2<f32>>>,
     events: Receiver<Event>,
     /// Player id for this client.
     player_id: PlayerId,
 }
 
+pub struct SettingsHandle {
+    dirty: AtomicBool,
+    settings: Mutex<GameSettings>,
+}
+
 pub struct GameHandle {
     events: Sender<Event>,
     cursor: Arc<Mutex<Point2<f32>>>,
+    pub settings: Arc<SettingsHandle>,
 }
 
 impl<'a, 'b> GetPlayer for &'b Player<'a> {
@@ -128,10 +138,28 @@ impl GameHandle {
     }
 }
 
+impl SettingsHandle {
+    pub fn dirty(&self) -> Option<GameSettings> {
+        if self.dirty.load(Ordering::SeqCst) {
+            self.dirty.store(false, Ordering::SeqCst);
+            let settings = self.settings.lock();
+            Some(*settings)
+        } else {
+            None
+        }
+    }
+
+    pub fn settings(&self) -> GameSettings {
+        let settings = self.settings.lock();
+        *settings
+    }
+}
+
 impl Game {
     pub fn new(
         players: HashMap<PlayerId, StaticPlayerState>,
         snapshot: Snapshot,
+        settings: GameSettings,
         player_id: PlayerId,
         cursor: Point2<f32>,
     ) -> (Game, GameHandle) {
@@ -139,6 +167,10 @@ impl Game {
         snapshots.push_back((snapshot, Instant::now()));
         let (events_tx, events_rx) = channel::bounded(16);
         let cursor = Arc::new(Mutex::new(cursor));
+        let settings_handle = Arc::new(SettingsHandle {
+            dirty: AtomicBool::new(false),
+            settings: Mutex::new(settings),
+        });
         let game = Game {
             players,
             snapshots,
@@ -146,12 +178,29 @@ impl Game {
             events: events_rx,
             round: RoundState::default(),
             player_id,
+            settings,
+            settings_handle: Arc::clone(&settings_handle),
         };
         let handle = GameHandle {
             cursor,
             events: events_tx,
+            settings: settings_handle,
         };
         (game, handle)
+    }
+
+    pub fn settings(&self) -> &GameSettings {
+        &self.settings
+    }
+
+    /// Modifies the game settings and flags the change to be sent to
+    /// the server.
+    pub fn set_settings(&mut self, settings: GameSettings) {
+        self.settings = settings;
+        let mut shared = self.settings_handle.settings.lock();
+        *shared = settings;
+        drop(shared);
+        self.settings_handle.dirty.store(true, Ordering::SeqCst);
     }
 
     /// Handles events from the server.
@@ -161,6 +210,9 @@ impl Game {
                 Event::RoundState(round) => {
                     info!("transitioning to round state {:?}", round);
                     self.round = round;
+                },
+                Event::Settings(settings) => {
+                    self.settings = settings;
                 },
                 Event::NewPlayer {
                     id,
@@ -208,21 +260,25 @@ impl Game {
         }
     }
 
+    /// Removes any old snapshots that are no longer needed for
+    /// interpolation.
+    pub fn clean_old_snapshots(&mut self, time: Instant, delay: f32) {
+        let delayed_time = time - SNAPSHOT_RATE.mul_f64(delay.into());
+        while self.snapshots.len() > 1 && delayed_time > self.snapshots[1].1 {
+            // Yay for short circuiting &&
+            self.snapshots.pop_front();
+        }
+    }
+
     /// Interpolates snapshots with delay and returns the resulting
     /// set of player states.
     pub fn interpolated_players(
-        &mut self,
+        &self,
         time: Instant,
         cursor: Point2<f32>,
         delay: f32,
     ) -> Players<InterpolatedSnapshot> {
         let delayed_time = time - SNAPSHOT_RATE.mul_f64(delay.into());
-
-        // Get rid of old snapshots.
-        while self.snapshots.len() > 1 && delayed_time > self.snapshots[1].1 {
-            // Yay for short circuiting &&
-            self.snapshots.pop_front();
-        }
 
         let (ref old, old_time) = self.snapshots[0];
         let snapshot = match self.snapshots.get(1) {

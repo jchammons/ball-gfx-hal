@@ -1,4 +1,4 @@
-use crate::game::{Ball, BALL_RADIUS, CURSOR_RADIUS};
+use crate::game::{Ball, GameSettings};
 use nalgebra::{Point2, Vector2};
 
 #[derive(Debug, Copy, Clone)]
@@ -45,20 +45,18 @@ impl<V> Circle<V> {
 }
 
 /// Returns the physics circle corresponding to the boundary.
-pub fn bounds() -> Circle<Static> {
-    Circle::inner(1.0, Point2::origin(), Static)
+pub fn bounds(settings: &GameSettings) -> Circle<Static> {
+    Circle::inner(settings.bounds_radius, Point2::origin(), Static)
 }
 
 /// Returns the physics circle corresponding to a given cursor
 /// position.
-pub fn cursor(cursor: Point2<f32>) -> Circle<Static> {
-    Circle::outer(CURSOR_RADIUS, cursor, Static)
+pub fn cursor(cursor: Point2<f32>, settings: &GameSettings) -> Circle<Static> {
+    Circle::outer(settings.cursor_radius, cursor, Static)
 }
 
-impl From<Ball> for Circle<Vector2<f32>> {
-    fn from(ball: Ball) -> Circle<Vector2<f32>> {
-        Circle::outer(BALL_RADIUS, ball.position, ball.velocity)
-    }
+pub fn ball(ball: Ball, settings: &GameSettings) -> Circle<Vector2<f32>> {
+    Circle::outer(settings.ball_radius, ball.position, ball.velocity)
 }
 
 impl From<Circle<Vector2<f32>>> for Ball {

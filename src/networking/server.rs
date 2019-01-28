@@ -2,6 +2,7 @@ use crate::game::{
     clamp_cursor,
     server::Game,
     Event,
+    GameSettings,
     GetPlayer,
     PlayerId,
     RoundStateKind,
@@ -57,6 +58,7 @@ pub enum ServerPacket {
     Pong(u32),
     Handshake {
         id: PlayerId,
+        settings: GameSettings,
         players: HashMap<PlayerId, StaticPlayerState>,
         snapshot: Snapshot,
     },
@@ -135,6 +137,7 @@ impl ServerPacket {
                     } => true,
                     Event::RemovePlayer(_) => true,
                     Event::RoundState(_) => true,
+                    Event::Settings(_) => true,
                     Event::Snapshot(_) => false,
                 }
             },
@@ -152,6 +155,11 @@ impl ServerPacket {
                 // Only resend if the round state hasn't
                 // changed again since it was sent.
                 RoundStateKind::from(round) == RoundStateKind::from(game.round)
+            },
+            ServerPacket::Event(Event::Settings(settings)) => {
+                // Only resend if the round state hasn't
+                // changed again since it was sent.
+                &game.settings == settings
             },
             // Everything else is simple.
             _ => self.reliable(),
@@ -413,7 +421,8 @@ impl Server {
             TimeoutState::LostConnection(addr),
         );
 
-        let (player_id, events) = self.game.add_player(clamp_cursor(cursor));
+        let (player_id, events) =
+            self.game.add_player(clamp_cursor(cursor, &self.game.settings));
         self.send_events(events)?;
 
         // Now start processing this client.
@@ -429,6 +438,7 @@ impl Server {
         // Send handshake message to the new client.
         let packet = ServerPacket::Handshake {
             id: player_id,
+            settings: self.game.settings,
             players: self
                 .game
                 .players()
@@ -510,9 +520,20 @@ impl Server {
                             client.last_input = sequence;
                             self.game.set_player_cursor(
                                 client.player,
-                                clamp_cursor(input.cursor),
+                                clamp_cursor(input.cursor, &self.game.settings),
                             );
                         }
+                    },
+                    ClientPacket::Settings(settings) => {
+                        // Update the server settings.
+                        self.game.settings = settings;
+
+                        // Forward this change to the other clients.
+                        let packet =
+                            ServerPacket::Event(Event::Settings(settings));
+                        self.broadcast_filter(&packet, |(&client_addr, _)| {
+                            addr != client_addr
+                        })?;
                     },
                     ClientPacket::Handshake {
                         ..
@@ -574,10 +595,22 @@ impl Server {
     }
 
     fn broadcast(&mut self, packet: &ServerPacket) -> Result<(), Error> {
+        self.broadcast_filter(packet, |_| true)
+    }
+
+    fn broadcast_filter<F: FnMut((&SocketAddr, &Client)) -> bool>(
+        &mut self,
+        packet: &ServerPacket,
+        mut pred: F,
+    ) -> Result<(), Error> {
         if !self.clients.is_empty() {
             let data = bincode::serialize(packet).unwrap();
 
-            for (&addr, client) in self.clients.iter_mut() {
+            for (&addr, client) in self
+                .clients
+                .iter_mut()
+                .filter(|(addr, client)| pred((addr, &*client)))
+            {
                 let mut with_header =
                     Vec::with_capacity(data.len() + HEADER_BYTES);
                 let sequence = client.connection.send_header(&mut with_header);

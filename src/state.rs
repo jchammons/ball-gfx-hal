@@ -1,5 +1,5 @@
 use crate::debug::DebugState;
-use crate::game::{clamp_cursor, client::Game, GetPlayer};
+use crate::game::{clamp_cursor, client::Game, GameSettings, GetPlayer};
 use crate::graphics::{Circle, CircleRenderer, DrawContext};
 use crate::networking::{
     self,
@@ -14,16 +14,24 @@ use palette::LinSrgb;
 use std::iter;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Instant;
-use winit::{dpi::LogicalSize, ElementState, MouseButton, WindowEvent};
+use winit::{
+    dpi::LogicalSize,
+    ElementState,
+    MouseButton,
+    VirtualKeyCode,
+    WindowEvent,
+};
 
 const SCALE: f32 = 0.9;
-/// This is a function since `Point2::new` isn't `const fn`.
-///
-/// Hopefully the compiler can optimize this as expected.
-fn bounds_circle() -> Circle {
+
+fn bounds_circle(settings: Option<&GameSettings>) -> Circle {
+    let bounds_radius = match settings {
+        Some(settings) => settings.bounds_radius,
+        None => 1.0,
+    };
     Circle {
         center: Point2::new(0.0, 0.0),
-        radius: SCALE,
+        radius: SCALE * bounds_radius,
         color: LinSrgb::new(1.0, 1.0, 1.0),
     }
 }
@@ -52,6 +60,7 @@ enum Screen {
         done: ConnectedHandle,
         game: Game,
         locked: bool,
+        show_settings: bool,
     },
 }
 
@@ -121,9 +130,23 @@ impl GameState {
             Screen::InGame {
                 ref game,
                 ref mut locked,
+                ref mut show_settings,
                 ..
             } => {
                 match event {
+                    WindowEvent::KeyboardInput {
+                        input,
+                        ..
+                    } => {
+                        match input.virtual_keycode {
+                            Some(VirtualKeyCode::S)
+                                if input.state == ElementState::Pressed =>
+                            {
+                                *show_settings = !*show_settings;
+                            }
+                            _ => (),
+                        }
+                    },
                     WindowEvent::CursorMoved {
                         ..
                     } if !*locked => game.update_cursor(self.cursor),
@@ -155,6 +178,7 @@ impl GameState {
                                 done,
                                 game,
                                 locked: false,
+                                show_settings: false,
                             })
                         },
                         Ok(Err(err)) => {
@@ -233,41 +257,50 @@ impl GameState {
             Screen::MainMenu {
                 ..
             } => {
-                circle_rend.draw(ctx, iter::once(bounds_circle()));
+                circle_rend.draw(ctx, iter::once(bounds_circle(None)));
             },
             Screen::InGame {
                 ref mut game,
                 ..
             } => {
                 // TODO use the z-buffer to reduce overdraw here
-                // circle_rend.draw(ctx, iter::once(bounds_circle()));
+
+                game.clean_old_snapshots(now, debug.interpolation_delay);
+
+                let players = game.interpolated_players(
+                    now,
+                    clamp_cursor(self.cursor, game.settings()),
+                    debug.interpolation_delay,
+                );
+                let circles = players.into_iter().flat_map(|(_, player)| {
+                    player.draw(SCALE, game.settings())
+                });
+
+                let bounds_circle = bounds_circle(Some(game.settings()));
 
                 if debug.draw_latest_snapshot {
-                    // TODO avoid submitting a second drawcall here
                     let players = game.latest_players();
-                    let circles = players
+                    let debug_circles = players
                         .into_iter()
-                        .flat_map(|(_, player)| player.draw(SCALE))
+                        .flat_map(|(_, player)| {
+                            player.draw(SCALE, game.settings())
+                        })
                         .map(|circle| {
                             Circle {
                                 color: LinSrgb::new(0.8, 0.0, 0.0),
                                 ..circle
                             }
                         });
-                    circle_rend.draw(ctx, circles);
+                    circle_rend.draw(
+                        ctx,
+                        iter::once(bounds_circle)
+                            .chain(debug_circles)
+                            .chain(circles),
+                    );
+                } else {
+                    circle_rend
+                        .draw(ctx, iter::once(bounds_circle).chain(circles));
                 }
-
-                let players = game.interpolated_players(
-                    now,
-                    clamp_cursor(self.cursor),
-                    debug.interpolation_delay,
-                );
-                let circles = players
-                    .into_iter()
-                    .flat_map(|(_, player)| player.draw(SCALE));
-
-                circle_rend
-                    .draw(ctx, iter::once(bounds_circle()).chain(circles));
             },
         }
     }
@@ -418,8 +451,58 @@ impl GameState {
                 );
             },
             Screen::InGame {
+                ref show_settings,
+                ref mut game,
                 ..
-            } => (),
+            } => {
+                if *show_settings {
+                    ui.window(im_str!("Game Settings"))
+                        .always_auto_resize(true)
+                        .build(|| {
+                            let mut settings = *game.settings();
+                            let mut changed = false;
+                            changed |= ui
+                                .input_float(
+                                    im_str!("ball radius"),
+                                    &mut settings.ball_radius,
+                                )
+                                .build();
+                            changed |= ui
+                                .input_float(
+                                    im_str!("cursor radius"),
+                                    &mut settings.cursor_radius,
+                                )
+                                .build();
+                            changed |= ui
+                                .input_float(
+                                    im_str!("spring constant"),
+                                    &mut settings.spring_constant,
+                                )
+                                .build();
+                            changed |= ui
+                                .input_float(
+                                    im_str!("ball start distance"),
+                                    &mut settings.ball_start_distance,
+                                )
+                                .build();
+                            changed |= ui
+                                .input_float(
+                                    im_str!("ball start speed"),
+                                    &mut settings.ball_start_speed,
+                                )
+                                .build();
+                            changed |= ui
+                                .input_float(
+                                    im_str!("bounds radius"),
+                                    &mut settings.bounds_radius,
+                                )
+                                .build();
+                            if changed {
+                                game.set_settings(settings);
+                            }
+                        });
+                }
+            },
         }
     }
 }
