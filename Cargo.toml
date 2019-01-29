@@ -4,9 +4,6 @@ version = "0.1.0"
 authors = ["Benjamin <benjamin@chronicembetterment.org>"]
 edition = "2018"
 
-[features]
-default = ["renderdoc"]
-
 [dependencies]
 gfx-hal = "0.1.0"
 gfx-backend-vulkan = "0.1.0"

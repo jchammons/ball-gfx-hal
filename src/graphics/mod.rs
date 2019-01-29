@@ -157,13 +157,13 @@ pub mod renderdoc {
 
 #[cfg(not(feature = "renderdoc"))]
 pub mod renderdoc {
-    type RenderDoc = ();
+    pub type RenderDoc = ();
 
     pub fn init() -> RenderDoc {
         ()
     }
 
-    pub fn trigger_capture(_: &mut RenderDoc, n_frames: u32) {}
+    pub fn trigger_capture(_: &mut RenderDoc, _: u32) {}
 }
 
 /// Picks a memory type staisfying `requirements` with `properties`,
