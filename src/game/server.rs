@@ -231,9 +231,9 @@ impl Game {
                 if let Some(cursor) = player.state.cursor {
                     let circle_cursor = physics::cursor(cursor, settings);
                     for (&id_ball, player_ball) in self.players.iter() {
-                        if id == id_ball {
-                            // Don't let players kill themselves.
-                            // TODO make this configurable
+                        if id == id_ball && !settings.kill_own_cursor {
+                            // Don't let players kill themselves
+                            // unless that setting is on.
                             continue;
                         }
 

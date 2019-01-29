@@ -15,7 +15,7 @@ use crate::networking::{
 use easer::functions::*;
 use gfx_hal::Backend;
 use imgui::{im_str, ImString, Ui};
-use log::{error, warn};
+use log::{debug, error, warn};
 use nalgebra::Point2;
 use palette::LinSrgb;
 use std::iter;
@@ -557,7 +557,15 @@ impl GameState {
                                     &mut settings.bounds_radius,
                                 )
                                 .build();
+                            changed |= ui.checkbox(
+                                im_str!("players can kill own cursor"),
+                                &mut settings.kill_own_cursor,
+                            );
                             if changed {
+                                debug!(
+                                    "sending updated settings: {:?}",
+                                    settings
+                                );
                                 game.set_settings(settings);
                             }
                         });
