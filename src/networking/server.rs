@@ -403,7 +403,6 @@ impl Server {
         let dt = dt.as_float_secs() as f32;
         self.timer.set_timeout(interval, TimeoutState::Tick);
 
-        debug!("stepping game tick (dt={})", dt);
         let events = self.game.tick(dt);
         self.send_events(events)?;
 

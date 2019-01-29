@@ -38,6 +38,7 @@ pub struct GameSettings {
     pub ball_start_distance: f32,
     pub ball_start_speed: f32,
     pub bounds_radius: f32,
+    pub kill_own_cursor: bool,
 }
 
 impl Default for GameSettings {
@@ -49,6 +50,7 @@ impl Default for GameSettings {
             ball_start_distance: 0.3,
             ball_start_speed: 1.0,
             bounds_radius: 1.0,
+            kill_own_cursor: false,
         }
     }
 }
