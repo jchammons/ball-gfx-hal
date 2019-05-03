@@ -293,7 +293,7 @@ impl Game {
             Some(&(ref new, new_time)) => {
                 let alpha = if delayed_time > old_time {
                     let span = new_time.duration_since(old_time);
-                    delayed_time.duration_since(old_time).div_duration(span)
+                    delayed_time.duration_since(old_time).div_duration_f32(span)
                 } else {
                     0.0
                 };

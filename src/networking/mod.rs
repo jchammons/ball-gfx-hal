@@ -50,7 +50,7 @@ impl RttEstimator {
     pub fn pong(&mut self, sequence: u32) {
         if let Some((expected, time)) = self.last_ping {
             if sequence == expected {
-                let sample = time.elapsed().as_float_secs() as f32;
+                let sample = time.elapsed().as_secs_f32();
                 self.rtt = Some(match self.rtt {
                     Some(rtt) => 0.875 * rtt + 0.125 * sample,
                     None => sample,

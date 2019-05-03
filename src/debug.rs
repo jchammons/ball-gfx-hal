@@ -92,9 +92,9 @@ impl DebugState {
             let start = NETWORK_HISTORY_LENGTH - size;
             for (i, stats) in self.network_rx.try_iter().enumerate() {
                 let bandwidth_in = stats.bytes_in as f32 /
-                    NETWORK_STATS_RATE.as_float_secs() as f32;
+                    NETWORK_STATS_RATE.as_secs_f32();
                 let bandwidth_out = stats.bytes_out as f32 /
-                    NETWORK_STATS_RATE.as_float_secs() as f32;
+                    NETWORK_STATS_RATE.as_secs_f32();
                 let packet_loss = f32::from(stats.packets_lost) /
                     f32::from(stats.packets_sent);
                 // Convert to KB

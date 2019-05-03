@@ -1,4 +1,4 @@
-#![feature(duration_float, range_contains, copy_within)]
+#![feature(duration_float, copy_within)]
 
 extern crate gfx_backend_vulkan as backend;
 use ctrlc;
@@ -147,16 +147,16 @@ fn run_gui() {
 
         let now = Instant::now();
         let update_time =
-            now.duration_since(last_update).as_float_secs() as f32;
+            now.duration_since(last_update).as_secs_f32();
         last_update = now;
 
         game_state.update(update_time);
 
-        if graphics.wait_for_frame(Some(Duration::from_float_secs(1.0 / 400.0)))
+        if graphics.wait_for_frame(Some(Duration::from_secs_f32(1.0 / 400.0)))
         {
             let now = Instant::now();
             let frame_time =
-                now.duration_since(last_frame).as_float_secs() as f32;
+                now.duration_since(last_frame).as_secs_f32();
             last_frame = now;
 
             let ui = imgui_winit.frame(&mut imgui, &window);

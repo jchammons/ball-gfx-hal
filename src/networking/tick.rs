@@ -53,7 +53,7 @@ impl Interval {
             }
         };
         let tick_length = tick - (self.next - self.interval);
-        trace!("scheduling next tick in {} secs", interval.as_float_secs());
+        trace!("scheduling next tick in {} secs", interval.as_secs_f32());
         self.next = tick + interval;
         (tick_length, interval)
     }

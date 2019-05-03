@@ -400,7 +400,7 @@ impl Server {
     fn game_tick(&mut self) -> Result<(), Error> {
         let now = Instant::now();
         let (dt, interval) = self.game_tick.next(now);
-        let dt = dt.as_float_secs() as f32;
+        let dt = dt.as_secs_f32();
         self.timer.set_timeout(interval, TimeoutState::Tick);
 
         let events = self.game.tick(dt);

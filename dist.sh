@@ -12,12 +12,9 @@ build_target () {
             export CXXFLAGS="\
 -DIMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS \
 -DIMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS \
--static -static-libstdc++ -static-libgcc"
-            
-            export RUSTFLAGS="$RUSTFLAGS \
--Clink-arg=-static \
--Clink-arg=-static-libgcc \
--Clink-arg=-static-libstdc++"
+-static"
+
+            export RUSTFLAGS="$RUSTFLAGS -C link-arg=-static"
         fi
 
         if [[ $1 == "i686-pc-windows-gnu" ]]; then
@@ -26,7 +23,7 @@ build_target () {
         fi
 
         echo "Building target $1..."
-        cargo build --release --target $1 --verbose
+        cargo build --release --target $1
     )
 }
 
@@ -37,8 +34,8 @@ dist_target () {
     case $1 in
         *"-pc-windows-gnu")
             bin_src="ball-gfx-hal.exe"
-            bin="ball-gfx-hal-$arch.exe"
-            dist="dist/ball-gfx-hal-windows"
+            bin="ball-gfx-hal.exe"
+            dist="dist/ball-gfx-hal-windows/$arch"
             toolchain="$arch-w64-mingw32"
             ;;
         *"-linux-gnu")
@@ -59,6 +56,23 @@ dist_target () {
     mkdir -p $dist
     cp target/$1/release/$bin_src $dist/$bin
     $toolchain-strip $dist/$bin
+
+    # copy required dlls over for the windows one
+    if [[ $1 = *"-pc-windows-gnu" ]]; then
+        prefix="/usr/$arch-w64-mingw32"
+        cp $prefix/lib/libstdc++-6.dll $dist
+        cp $prefix/bin/libwinpthread-1.dll $dist
+        case $arch in
+            "x86_64")
+                cp $prefix/lib/libgcc_s_seh-1.dll $dist
+                ;;
+            "i686")
+                cp $prefix/lib/libgcc_s_sjlj-1.dll $dist
+                ;;
+        esac
+        # strip all of the dlls
+        $toolchain-strip $dist/*.dll
+    fi
 }
 
 # builds and packages all targets for a given platform
@@ -76,7 +90,7 @@ package () {
             echo "unsupported platform $1"
             exit 1
     esac
-                
+
     echo "Building all $1 targets..."
 
     mkdir -p dist/$dist
@@ -85,7 +99,7 @@ package () {
     dist_target "x86_64-$target"
     build_target "i686-$target"
     dist_target "i686-$target"
-    
+
     echo "Packaging $1 targets..."
 
     cd dist/
